@@ -1,0 +1,21 @@
+{
+  "Description": "Cognito-protected Lambda-served LedgerFlow console.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
+    {"Key": "ArtifactBucketName", "Value": "${CF_OUT_ArtifactBucketName}"},
+    {"Key": "WebArtifactKey", "Value": "${WEB_ARTIFACT_KEY}", "Default": "lambda/web_app.zip"},
+    {"Key": "StateMachineArn", "Value": "${CF_OUT_StateMachineArn}"},
+    {"Key": "WorkflowCheckpointsTableName", "Value": "${CF_OUT_WorkflowCheckpointsTableName}"},
+    {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
+    {"Key": "ReportsBucketName", "Value": "${CF_OUT_ReportsBucketName}"},
+    {"Key": "PromptSelectionsTableName", "Value": "${CF_OUT_PromptSelectionsTableName}"},
+    {"Key": "PlannerPromptArn", "Value": "${CF_OUT_PlannerPromptArn}"},
+    {"Key": "SynthesisPromptArn", "Value": "${CF_OUT_SynthesisPromptArn}"},
+    {"Key": "PlannerPromptDefaultVersionArn", "Value": "${CF_OUT_PlannerPromptVersionArn}"},
+    {"Key": "SynthesisPromptDefaultVersionArn", "Value": "${CF_OUT_SynthesisPromptVersionArn}"},
+    {"Key": "BootstrapAdminEmail", "Value": "${BOOTSTRAP_ADMIN_EMAIL}", "Default": ""},
+    {"Key": "BootstrapAdminTenantId", "Value": "${BOOTSTRAP_ADMIN_TENANT_ID}", "Default": "tenant_acme"},
+    {"Key": "AllowedOrigin", "Value": "${ALLOWED_ORIGIN}", "Default": "*"}
+  ]
+}

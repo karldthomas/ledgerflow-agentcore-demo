@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  S3 Vectors storage and enhanced hybrid index. The post-create custom resource
+  enables ENHANCED mode and configures BM25 text fields because those operations
+  are not represented by the current CloudFormation Index property set. AWS
+  builds full-text fields asynchronously after accepting this configuration.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  KmsKeyArn:
+    Type: String
+  RuntimeExecutionRoleArn:
+    Type: String
+  ToolsExecutionRoleArn:
+    Type: String
+  ArtifactBucketName:
+    Type: String
+  LambdaPackageKey:
+    Type: String
+    Default: lambda/tool_handler.zip
+  VectorIndexName:
+    Type: String
+    Default: evidence
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,62}$'
+  VectorDimension:
+    Type: Number
+    Default: 1024
+    MinValue: 1
+    MaxValue: 4096
+  TextSearchFields:
+    Type: String
+    Default: text,title
+
+Resources:
+  EvidenceVectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      IndexMode: ENHANCED
+      FullTextSearch: BM25
+      HybridFusion: NativeRRF
+    Properties:
+      VectorBucketName: !Sub ledgerflow-${EnvironmentName}-vectors
+      EncryptionConfiguration:
+        SseType: aws:kms
+        KmsKeyArn: !Ref KmsKeyArn
+      Tags:
+        - Key: ledgerflow:environment
+          Value: !Ref EnvironmentName
+        - Key: ledgerflow:index-mode
+          Value: ENHANCED
+
+  EvidenceIndex:
+    Type: AWS::S3Vectors::Index
+    DependsOn: EvidenceVectorBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VectorBucketName: !Sub ledgerflow-${EnvironmentName}-vectors
+      IndexName: !Ref VectorIndexName
+      DataType: float32
+      Dimension: !Ref VectorDimension
+      DistanceMetric: cosine
+      EncryptionConfiguration:
+        SseType: aws:kms
+        KmsKeyArn: !Ref KmsKeyArn
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - text
+          - title
+          - source_uri
+          - content_hash
+      Tags:
+        - Key: ledgerflow:environment
+          Value: !Ref EnvironmentName
+        - Key: ledgerflow:retrieval
+          Value: hybrid
+
+  VectorBucketPolicy:
+    Type: AWS::S3Vectors::VectorBucketPolicy
+    Properties:
+      VectorBucketArn: !GetAtt EvidenceVectorBucket.VectorBucketArn
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLedgerFlowRuntimeVectorQueries
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Ref RuntimeExecutionRoleArn
+                - !Ref ToolsExecutionRoleArn
+            Action:
+              - s3vectors:GetVectorBucket
+              - s3vectors:GetIndex
+              - s3vectors:QueryVectors
+              - s3vectors:GetVectors
+            Resource:
+              - !GetAtt EvidenceVectorBucket.VectorBucketArn
+              - !GetAtt EvidenceIndex.IndexArn
+
+  EnhancedIndexConfigurationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-vectors-config
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigureEnhancedS3VectorsIndex
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3vectors:GetIndex
+                  - s3vectors:UpdateIndexMode
+                  - s3vectors:PutVectorBucketDefaultIndexMode
+                  - s3vectors:UpdateMetadataConfiguration
+                Resource: '*'
+
+  EnhancedIndexConfigurationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-configure-vectors
+      Runtime: python3.12
+      Handler: enhanced_index_handler.handler
+      Timeout: 900
+      Role: !GetAtt EnhancedIndexConfigurationRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+
+  ConfigureEnhancedIndex:
+    Type: Custom::S3VectorsEnhancedIndex
+    Properties:
+      ServiceToken: !GetAtt EnhancedIndexConfigurationFunction.Arn
+      VectorBucketName: !Sub ledgerflow-${EnvironmentName}-vectors
+      IndexName: !Ref VectorIndexName
+      IndexArn: !GetAtt EvidenceIndex.IndexArn
+      TextSearchFields: !Ref TextSearchFields
+
+Outputs:
+  VectorBucketName:
+    Description: S3 Vectors bucket for evidence records
+    Value: !Sub ledgerflow-${EnvironmentName}-vectors
+  VectorBucketArn:
+    Value: !GetAtt EvidenceVectorBucket.VectorBucketArn
+  VectorIndexName:
+    Description: S3 Vectors hybrid evidence index
+    Value: !Ref VectorIndexName
+  VectorIndexArn:
+    Value: !GetAtt EvidenceIndex.IndexArn
+  VectorIndexMode:
+    Description: Index mode enforced by the post-create configuration hook
+    Value: ENHANCED
+  FullTextSearchFields:
+    Description: Metadata fields indexed for BM25 search
+    Value: !Ref TextSearchFields

@@ -1,0 +1,8 @@
+{
+  "Description": "Parameters for the LedgerFlow security and artifact foundation stack.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${ENVIRONMENT_NAME}", "Default": "dev"},
+    {"Key": "RetentionDays", "Value": "${RETENTION_DAYS}", "Default": "30"},
+    {"Key": "AgentRepositoryName", "Value": "${AGENT_REPOSITORY_NAME}", "Default": "ledgerflow-agent"}
+  ]
+}

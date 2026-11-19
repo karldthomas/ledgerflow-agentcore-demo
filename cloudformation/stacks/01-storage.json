@@ -1,0 +1,8 @@
+{
+  "Description": "Parameters for LedgerFlow storage. Values from 00-security are passed by deploy.py as CF_OUT_* context.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
+    {"Key": "RetentionDays", "Value": "${RETENTION_DAYS}", "Default": "30"}
+  ]
+}

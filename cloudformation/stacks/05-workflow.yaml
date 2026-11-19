@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Durable batch workflow and optional AgentCore online evaluation.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  RuntimeId:
+    Type: String
+  RuntimeArn:
+    Type: String
+  WorkflowExecutionRoleArn:
+    Type: String
+  EvaluationExecutionRoleArn:
+    Type: String
+  EvaluationSamplingPercentage:
+    Type: Number
+    Default: 10
+    MinValue: 0.01
+    MaxValue: 100
+  EnableOnlineEvaluation:
+    Type: String
+    Default: DISABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+
+Resources:
+  WorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/ledgerflow/${EnvironmentName}/workflow
+      RetentionInDays: 30
+
+  InvestigationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ledgerflow-${EnvironmentName}-investigations
+      RoleArn: !Ref WorkflowExecutionRoleArn
+      StateMachineType: STANDARD
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt WorkflowLogGroup.Arn
+        IncludeExecutionData: false
+        Level: ALL
+      DefinitionString: !Sub |
+        {
+          "Comment": "LedgerFlow durable incident investigation workflow",
+          "StartAt": "InvokeAgentRuntime",
+          "States": {
+            "InvokeAgentRuntime": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::aws-sdk:bedrockagentcore:invokeAgentRuntime",
+              "Parameters": {
+                "AgentRuntimeArn": "${RuntimeArn}",
+                "RuntimeSessionId.$": "States.Format('ledgerflow-runtime-session-{}-invocation', $.workflow_id)",
+                "Payload.$": "States.JsonToString($)"
+              },
+              "Retry": [
+                {"ErrorEquals": ["States.Timeout", "States.TaskFailed", "States.ServiceUnavailable"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2.0}
+              ],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "InvestigationFailed"}],
+              "ResultPath": "$.agent_result",
+              "Next": "InvestigationSucceeded"
+            },
+            "InvestigationSucceeded": {"Type": "Succeed"},
+            "InvestigationFailed": {
+              "Type": "Fail",
+              "Error": "LedgerFlow.InvestigationFailed",
+              "Cause": "The Runtime invocation failed after retry and requires checkpoint-based recovery."
+            }
+          }
+        }
+
+  AgentCoreOnlineEvaluation:
+    Type: AWS::BedrockAgentCore::OnlineEvaluationConfig
+    Properties:
+      OnlineEvaluationConfigName: !Sub LedgerFlow_${EnvironmentName}_Evaluation
+      Description: Sample live traces for correctness, helpfulness, and goal success.
+      EvaluationExecutionRoleArn: !Ref EvaluationExecutionRoleArn
+      ExecutionStatus: !Ref EnableOnlineEvaluation
+      DataSourceConfig:
+        CloudWatchLogs:
+          LogGroupNames:
+            - !Sub /aws/bedrock-agentcore/runtimes/${RuntimeId}-DEFAULT
+          ServiceNames:
+            - bedrock-agentcore
+      Evaluators:
+        - EvaluatorId: Builtin.Correctness
+        - EvaluatorId: Builtin.Helpfulness
+        - EvaluatorId: Builtin.GoalSuccessRate
+      Rule:
+        SamplingConfig:
+          SamplingPercentage: !Ref EvaluationSamplingPercentage
+        SessionConfig:
+          SessionTimeoutMinutes: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Purpose
+          Value: quality
+
+Outputs:
+  StateMachineArn:
+    Value: !GetAtt InvestigationStateMachine.Arn
+  StateMachineName:
+    Value: !Ref InvestigationStateMachine
+  EvaluationConfigArn:
+    Value: !GetAtt AgentCoreOnlineEvaluation.OnlineEvaluationConfigArn
+  WorkflowLogGroupName:
+    Value: !Ref WorkflowLogGroup

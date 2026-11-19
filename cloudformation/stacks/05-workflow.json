@@ -1,0 +1,12 @@
+{
+  "Description": "Durable Step Functions and AgentCore Evaluation parameters.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "RuntimeId", "Value": "${CF_OUT_RuntimeId}"},
+    {"Key": "RuntimeArn", "Value": "${CF_OUT_RuntimeArn}"},
+    {"Key": "WorkflowExecutionRoleArn", "Value": "${CF_OUT_WorkflowExecutionRoleArn}"},
+    {"Key": "EvaluationExecutionRoleArn", "Value": "${CF_OUT_EvaluationExecutionRoleArn}"},
+    {"Key": "EvaluationSamplingPercentage", "Value": "${EVALUATION_SAMPLING_PERCENTAGE}", "Default": "10"},
+    {"Key": "EnableOnlineEvaluation", "Value": "${ENABLE_ONLINE_EVALUATION}", "Default": "DISABLED"}
+  ]
+}

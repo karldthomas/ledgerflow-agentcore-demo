@@ -1,0 +1,352 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: LedgerFlow operational storage, report storage, and durable ledgers.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  KmsKeyArn:
+    Type: String
+  RetentionDays:
+    Type: Number
+    Default: 30
+
+Resources:
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketNamePrefix: !Sub ledgerflow-${EnvironmentName}-raw
+      BucketNamespace: account-regional
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKeyArn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRawFixtures
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketNamePrefix: !Sub ledgerflow-${EnvironmentName}-reports
+      BucketNamespace: account-regional
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKeyArn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  CustomersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-customers
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: CustomerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: CustomerId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-incidents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: IncidentId
+          AttributeType: S
+        - AttributeName: TenantId
+          AttributeType: S
+        - AttributeName: CreatedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: IncidentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TenantCreatedAtIndex
+          KeySchema:
+            - AttributeName: TenantId
+              KeyType: HASH
+            - AttributeName: CreatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  InvoicesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-invoices
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: InvoiceId
+          AttributeType: S
+        - AttributeName: CustomerId
+          AttributeType: S
+        - AttributeName: RenewalId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: InvoiceId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CustomerRenewalIndex
+          KeySchema:
+            - AttributeName: CustomerId
+              KeyType: HASH
+            - AttributeName: RenewalId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ApplicationLogsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-application-logs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LogId
+          AttributeType: S
+        - AttributeName: CustomerId
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LogId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CustomerTimestampIndex
+          KeySchema:
+            - AttributeName: CustomerId
+              KeyType: HASH
+            - AttributeName: Timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  DeploymentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-deployments
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: DeploymentId
+          AttributeType: S
+        - AttributeName: TenantId
+          AttributeType: S
+        - AttributeName: DeployedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: DeploymentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TenantDeployedAtIndex
+          KeySchema:
+            - AttributeName: TenantId
+              KeyType: HASH
+            - AttributeName: DeployedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+
+  VerifiedFactsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-verified-facts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: TenantSubject
+          AttributeType: S
+        - AttributeName: MemoryKey
+          AttributeType: S
+        - AttributeName: Status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: TenantSubject
+          KeyType: HASH
+        - AttributeName: MemoryKey
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: Status
+              KeyType: HASH
+            - AttributeName: TenantSubject
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+
+  WorkflowCheckpointsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-workflow-checkpoints
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: WorkflowId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: WorkflowId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  WorkflowEventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-workflow-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: WorkflowId
+          AttributeType: S
+        - AttributeName: EventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: WorkflowId
+          KeyType: HASH
+        - AttributeName: EventId
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAtEpoch
+        Enabled: true
+
+  OperationLedgerTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-operation-ledger
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: OperationId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: OperationId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAtEpoch
+        Enabled: true
+
+  PromptSelectionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-prompt-selections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PromptKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PromptKey
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+Outputs:
+  CustomersTableName:
+    Value: !Ref CustomersTable
+  RawDataBucketName:
+    Value: !Ref RawDataBucket
+  ReportsBucketName:
+    Value: !Ref ReportsBucket
+  IncidentsTableName:
+    Value: !Ref IncidentsTable
+  InvoicesTableName:
+    Value: !Ref InvoicesTable
+  ApplicationLogsTableName:
+    Value: !Ref ApplicationLogsTable
+  DeploymentsTableName:
+    Value: !Ref DeploymentsTable
+  VerifiedFactsTableName:
+    Value: !Ref VerifiedFactsTable
+  WorkflowCheckpointsTableName:
+    Value: !Ref WorkflowCheckpointsTable
+  WorkflowEventsTableName:
+    Value: !Ref WorkflowEventsTable
+  OperationLedgerTableName:
+    Value: !Ref OperationLedgerTable
+  PromptSelectionsTableName:
+    Value: !Ref PromptSelectionsTable

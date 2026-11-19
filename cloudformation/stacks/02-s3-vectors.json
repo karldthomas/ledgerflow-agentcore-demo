@@ -1,0 +1,14 @@
+{
+  "Description": "S3 Vectors Enhanced index parameters. The custom resource configures BM25 fields and validates ENHANCED mode.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
+    {"Key": "RuntimeExecutionRoleArn", "Value": "${CF_OUT_RuntimeExecutionRoleArn}"},
+    {"Key": "ToolsExecutionRoleArn", "Value": "${CF_OUT_ToolsExecutionRoleArn}"},
+    {"Key": "ArtifactBucketName", "Value": "${CF_OUT_ArtifactBucketName}"},
+    {"Key": "LambdaPackageKey", "Value": "${LAMBDA_PACKAGE_KEY}", "Default": "lambda/tool_handler.zip"},
+    {"Key": "VectorIndexName", "Value": "${VECTOR_INDEX_NAME}", "Default": "evidence"},
+    {"Key": "VectorDimension", "Value": "${VECTOR_DIMENSION}", "Default": "1024"},
+    {"Key": "TextSearchFields", "Value": "${VECTOR_TEXT_SEARCH_FIELDS}", "Default": "text,title"}
+  ]
+}

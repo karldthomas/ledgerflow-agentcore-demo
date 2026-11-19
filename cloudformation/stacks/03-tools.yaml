@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Read-only Lambda tools exposed through the AgentCore Gateway stack.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  ArtifactBucketName:
+    Type: String
+  LambdaPackageKey:
+    Type: String
+    Default: lambda/tool_handler.zip
+  ToolsExecutionRoleArn:
+    Type: String
+  VectorDimension:
+    Type: Number
+    Default: 1024
+    MinValue: 1
+    MaxValue: 4096
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+  IncidentsTableName:
+    Type: String
+  InvoicesTableName:
+    Type: String
+  ApplicationLogsTableName:
+    Type: String
+  DeploymentsTableName:
+    Type: String
+  VectorBucketName:
+    Type: String
+  VectorIndexName:
+    Type: String
+  CustomersTableName:
+    Type: String
+
+Mappings:
+  ToolSettings:
+    search-incidents:
+      Timeout: 30
+    get-customer-invoices:
+      Timeout: 30
+    get-application-logs:
+      Timeout: 60
+    get-deployments:
+      Timeout: 30
+    get-current-invoice-state:
+      Timeout: 30
+    search-evidence:
+      Timeout: 120
+
+Resources:
+  SearchIncidentsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-search-incidents
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, search-incidents, Timeout]
+      MemorySize: 512
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: search_incidents
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  GetCustomerInvoicesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-get-customer-invoices
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, get-customer-invoices, Timeout]
+      MemorySize: 512
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: get_customer_invoices
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  GetApplicationLogsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-get-application-logs
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, get-application-logs, Timeout]
+      MemorySize: 512
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: get_application_logs
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  GetDeploymentsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-get-deployments
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, get-deployments, Timeout]
+      MemorySize: 512
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: get_deployments
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  GetCurrentInvoiceStateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-get-current-invoice-state
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, get-current-invoice-state, Timeout]
+      MemorySize: 512
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: get_current_invoice_state
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  SearchEvidenceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-search-evidence
+      Runtime: python3.12
+      Handler: tool_handler.handler
+      Timeout: !FindInMap [ToolSettings, search-evidence, Timeout]
+      MemorySize: 1024
+      Role: !Ref ToolsExecutionRoleArn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          TOOL_NAME: search_evidence
+          CUSTOMERS_TABLE: !Ref CustomersTableName
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          INVOICES_TABLE: !Ref InvoicesTableName
+          APPLICATION_LOGS_TABLE: !Ref ApplicationLogsTableName
+          DEPLOYMENTS_TABLE: !Ref DeploymentsTableName
+          VECTOR_BUCKET_NAME: !Ref VectorBucketName
+          VECTOR_INDEX_NAME: !Ref VectorIndexName
+          VECTOR_DIMENSION: !Ref VectorDimension
+          EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
+
+  AllowAgentCoreToInvokeTools:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SearchIncidentsFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  AllowAgentCoreToInvokeInvoices:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GetCustomerInvoicesFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  AllowAgentCoreToInvokeLogs:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GetApplicationLogsFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  AllowAgentCoreToInvokeDeployments:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GetDeploymentsFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  AllowAgentCoreToInvokeInvoiceState:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GetCurrentInvoiceStateFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  AllowAgentCoreToInvokeEvidence:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SearchEvidenceFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+Outputs:
+  SearchIncidentsFunctionArn:
+    Value: !GetAtt SearchIncidentsFunction.Arn
+  GetCustomerInvoicesFunctionArn:
+    Value: !GetAtt GetCustomerInvoicesFunction.Arn
+  GetApplicationLogsFunctionArn:
+    Value: !GetAtt GetApplicationLogsFunction.Arn
+  GetDeploymentsFunctionArn:
+    Value: !GetAtt GetDeploymentsFunction.Arn
+  GetCurrentInvoiceStateFunctionArn:
+    Value: !GetAtt GetCurrentInvoiceStateFunction.Arn
+  SearchEvidenceFunctionArn:
+    Value: !GetAtt SearchEvidenceFunction.Arn

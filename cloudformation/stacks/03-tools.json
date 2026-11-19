@@ -1,0 +1,18 @@
+{
+  "Description": "Read-only Lambda tool parameters. Package the artifact before deploying this stack.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "ArtifactBucketName", "Value": "${CF_OUT_ArtifactBucketName}"},
+    {"Key": "LambdaPackageKey", "Value": "${LAMBDA_PACKAGE_KEY}", "Default": "lambda/tool_handler.zip"},
+    {"Key": "ToolsExecutionRoleArn", "Value": "${CF_OUT_ToolsExecutionRoleArn}"},
+    {"Key": "VectorDimension", "Value": "${VECTOR_DIMENSION}", "Default": "1024"},
+    {"Key": "EmbeddingModelId", "Value": "${EMBEDDING_MODEL_ID}", "Default": "amazon.titan-embed-text-v2:0"},
+    {"Key": "IncidentsTableName", "Value": "${CF_OUT_IncidentsTableName}"},
+    {"Key": "InvoicesTableName", "Value": "${CF_OUT_InvoicesTableName}"},
+    {"Key": "ApplicationLogsTableName", "Value": "${CF_OUT_ApplicationLogsTableName}"},
+    {"Key": "DeploymentsTableName", "Value": "${CF_OUT_DeploymentsTableName}"},
+    {"Key": "VectorBucketName", "Value": "${CF_OUT_VectorBucketName}"},
+    {"Key": "VectorIndexName", "Value": "${CF_OUT_VectorIndexName}"},
+    {"Key": "CustomersTableName", "Value": "${CF_OUT_CustomersTableName}"}
+  ]
+}

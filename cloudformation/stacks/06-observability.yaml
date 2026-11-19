@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudWatch logs, dashboards, metric filters, and alarms for LedgerFlow.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  StateMachineArn:
+    Type: String
+  WorkflowLogGroupName:
+    Type: String
+  RuntimeEndpointArn:
+    Type: String
+  EvaluationConfigArn:
+    Type: String
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 3650
+
+Resources:
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/ledgerflow/${EnvironmentName}/application
+      RetentionInDays: !Ref LogRetentionDays
+
+  InvestigationFailureMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkflowLogGroupName
+      FilterPattern: '{ $.type = "TaskFailed" || $.type = "ExecutionFailed" }'
+      MetricTransformations:
+        - MetricName: InvestigationFailures
+          MetricNamespace: !Sub LedgerFlow/${EnvironmentName}
+          MetricValue: '1'
+          DefaultValue: 0
+
+  InvestigationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ledgerflow-${EnvironmentName}-investigation-failures
+      AlarmDescription: Investigation workflow failures require checkpoint recovery review.
+      Namespace: !Sub LedgerFlow/${EnvironmentName}
+      MetricName: InvestigationFailures
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  LedgerFlowDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ledgerflow-${EnvironmentName}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Investigation failures",
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "metrics": [["LedgerFlow/${EnvironmentName}", "InvestigationFailures"]],
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "text",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "markdown": "# LedgerFlow\\n\\nRuntime endpoint: `${RuntimeEndpointArn}`\\n\\nEvaluation configuration: `${EvaluationConfigArn}`\\n\\nState machine: `${StateMachineArn}`"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApplicationLogGroupName:
+    Value: !Ref ApplicationLogGroup
+  InvestigationFailureAlarmArn:
+    Value: !GetAtt InvestigationFailureAlarm.Arn
+  DashboardName:
+    Value: !Sub ledgerflow-${EnvironmentName}

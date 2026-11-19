@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cognito-protected Lambda-served LedgerFlow investigation console.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  KmsKeyArn:
+    Type: String
+  ArtifactBucketName:
+    Type: String
+  WebArtifactKey:
+    Type: String
+    Default: lambda/web_app.zip
+  StateMachineArn:
+    Type: String
+  WorkflowCheckpointsTableName:
+    Type: String
+  WorkflowEventsTableName:
+    Type: String
+  ReportsBucketName:
+    Type: String
+  PromptSelectionsTableName:
+    Type: String
+  PlannerPromptArn:
+    Type: String
+  SynthesisPromptArn:
+    Type: String
+  PlannerPromptDefaultVersionArn:
+    Type: String
+  SynthesisPromptDefaultVersionArn:
+    Type: String
+  BootstrapAdminEmail:
+    Type: String
+    Default: ''
+    Description: Optional email to invite as the first Cognito admin.
+  BootstrapAdminTenantId:
+    Type: String
+    Default: tenant_acme
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+
+Conditions:
+  HasBootstrapAdmin: !Not [!Equals [!Ref BootstrapAdminEmail, '']]
+
+Resources:
+  LedgerFlowUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ledgerflow-${EnvironmentName}-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      UserPoolTags:
+        Environment: !Ref EnvironmentName
+        Purpose: investigation-console
+
+  LedgerFlowAdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      Description: Can create users and inspect LLM prompt events.
+      UserPoolId: !Ref LedgerFlowUserPool
+      Precedence: 1
+
+  LedgerFlowOperatorsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: operators
+      Description: Can run tenant-scoped investigations.
+      UserPoolId: !Ref LedgerFlowUserPool
+      Precedence: 10
+
+  LedgerFlowUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref LedgerFlowUserPool
+      ClientName: !Sub ledgerflow-${EnvironmentName}-web
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  WebAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-web
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WebConsoleReadAndStart
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref StateMachineArn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowCheckpointsTableName}
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowEventsTableName}
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PromptSelectionsTableName}
+              - Effect: Allow
+                Action:
+                  - bedrock:ListPrompts
+                  - bedrock:GetPrompt
+                  - bedrock:CreatePrompt
+                  - bedrock:UpdatePrompt
+                  - bedrock:CreatePromptVersion
+                Resource: '*'
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ReportsBucketName}/investigations/*
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:CreateGrant
+                Resource: !Ref KmsKeyArn
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:ListUsers
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: !GetAtt LedgerFlowUserPool.Arn
+
+  WebAppFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-web
+      Runtime: python3.12
+      Handler: web_app.handler
+      Role: !GetAtt WebAppRole.Arn
+      Timeout: 30
+      MemorySize: 1024
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref WebArtifactKey
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref LedgerFlowUserPool
+          USER_POOL_CLIENT_ID: !Ref LedgerFlowUserPoolClient
+          STATE_MACHINE_ARN: !Ref StateMachineArn
+          WORKFLOW_CHECKPOINTS_TABLE: !Ref WorkflowCheckpointsTableName
+          WORKFLOW_EVENTS_TABLE: !Ref WorkflowEventsTableName
+          REPORTS_BUCKET: !Ref ReportsBucketName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          KMS_KEY_ARN: !Ref KmsKeyArn
+          PROMPT_SELECTIONS_TABLE: !Ref PromptSelectionsTableName
+          PLANNER_PROMPT_ARN: !Ref PlannerPromptArn
+          SYNTHESIS_PROMPT_ARN: !Ref SynthesisPromptArn
+          PLANNER_PROMPT_DEFAULT_ARN: !Ref PlannerPromptDefaultVersionArn
+          SYNTHESIS_PROMPT_DEFAULT_ARN: !Ref SynthesisPromptDefaultVersionArn
+
+  WebApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ledgerflow-${EnvironmentName}-web
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: !Split [",", !Ref AllowedOrigin]
+        AllowHeaders:
+          - authorization
+          - content-type
+        AllowMethods:
+          - GET
+          - POST
+
+  WebApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt WebAppFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  WebApiAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref WebApi
+      AuthorizerType: JWT
+      AuthorizerResultTtlInSeconds: 0
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref LedgerFlowUserPoolClient
+        Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${LedgerFlowUserPool}
+      Name: CognitoJwtAuthorizer
+
+  PublicIndexRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /
+      Target: !Sub integrations/${WebApiIntegration}
+
+  PublicAppRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /app.js
+      Target: !Sub integrations/${WebApiIntegration}
+
+  PublicStylesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /styles.css
+      Target: !Sub integrations/${WebApiIntegration}
+
+  PublicConfigRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /config.js
+      Target: !Sub integrations/${WebApiIntegration}
+
+  CreateInvestigationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/investigations
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  GetInvestigationRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /api/investigations/{workflow_id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  GetEventsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /api/investigations/{workflow_id}/events
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  ListUsersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /api/admin/users
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  CreateUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/users
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  ListPromptsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /api/admin/prompts
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  CreatePromptRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/prompts
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  UpdatePromptRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: PUT /api/admin/prompts/{prompt_key}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  CreatePromptVersionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/prompts/{prompt_key}/versions
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  ActivatePromptVersionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/prompts/{prompt_key}/active
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  WebApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebApi
+      StageName: $default
+      AutoDeploy: true
+
+  WebAppInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebAppFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebApi}/*
+
+  BootstrapAdminFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasBootstrapAdmin
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-bootstrap-admin
+      Runtime: python3.12
+      Handler: bootstrap_admin.handler
+      Role: !GetAtt BootstrapAdminRole.Arn
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref WebArtifactKey
+
+  BootstrapAdminRole:
+    Type: AWS::IAM::Role
+    Condition: HasBootstrapAdmin
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-bootstrap-admin
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BootstrapCognitoAdmin
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminAddUserToGroup
+                Resource: !GetAtt LedgerFlowUserPool.Arn
+
+  BootstrapAdmin:
+    Type: Custom::LedgerFlowBootstrapAdmin
+    Condition: HasBootstrapAdmin
+    DependsOn:
+      - BootstrapAdminFunction
+      - LedgerFlowAdminsGroup
+    Properties:
+      ServiceToken: !GetAtt BootstrapAdminFunction.Arn
+      UserPoolId: !Ref LedgerFlowUserPool
+      Email: !Ref BootstrapAdminEmail
+      TenantId: !Ref BootstrapAdminTenantId
+
+Outputs:
+  WebApiUrl:
+    Value: !GetAtt WebApi.ApiEndpoint
+  UserPoolId:
+    Value: !Ref LedgerFlowUserPool
+  UserPoolClientId:
+    Value: !Ref LedgerFlowUserPoolClient
+  UserPoolArn:
+    Value: !GetAtt LedgerFlowUserPool.Arn
+  WebAppFunctionArn:
+    Value: !GetAtt WebAppFunction.Arn

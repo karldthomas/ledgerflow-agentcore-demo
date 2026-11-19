@@ -1,0 +1,4 @@
+# Pin a recent AWS SDK in the Lambda artifact so the S3 Vectors enhanced
+# QueryVectors fields (queryTexts, queryMode, and returnScores) are available
+# even when the managed Lambda runtime SDK is older.
+boto3>=1.40.0,<2

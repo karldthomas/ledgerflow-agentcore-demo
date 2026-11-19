@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  LedgerFlow foundation resources. This stack intentionally publishes ordinary
+  Outputs only; cloudformation/deploy.py passes them to later stacks.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '^[a-z][a-z0-9-]{1,15}$'
+  RetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 3650
+  AgentRepositoryName:
+    Type: String
+    Default: ledgerflow-agent
+    AllowedPattern: '^[a-z0-9]+(?:[._/-][a-z0-9]+)*$'
+
+Resources:
+  LedgerFlowKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub LedgerFlow ${EnvironmentName} data encryption key
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudFormationAndServicesToUseKey
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+                - indexing.s3vectors.amazonaws.com
+                - dynamodb.amazonaws.com
+                - logs.amazonaws.com
+                - ecr.amazonaws.com
+                - bedrock-agentcore.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncrypt*
+            Resource: '*'
+          - Sid: AllowGatewayRoleToUseAgentCorePolicyKey
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt GatewayExecutionRole.Arn
+            Action:
+              - kms:CreateGrant
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey
+              - kms:ReEncrypt*
+            Resource: '*'
+
+  LedgerFlowKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/ledgerflow-${EnvironmentName}
+      TargetKeyId: !Ref LedgerFlowKey
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketNamePrefix: !Sub ledgerflow-${EnvironmentName}-artifacts
+      BucketNamespace: account-regional
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt LedgerFlowKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentArtifacts
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref RetentionDays
+
+  AgentRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${AgentRepositoryName}-${EnvironmentName}
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !GetAtt LedgerFlowKey.Arn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {"rulePriority": 1, "description": "Keep the latest ten images", "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10}, "action": {"type": "expire"}}
+            ]
+          }
+
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-runtime
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RuntimeLeastPrivilegePoc
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:GetPrompt
+                  - bedrock:RenderPrompt
+                  - bedrock-agentcore:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: !GetAtt LedgerFlowKey.Arn
+              - Effect: Allow
+                Action:
+                  - s3vectors:GetIndex
+                  - s3vectors:QueryVectors
+                  - s3vectors:GetVectors
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  ToolsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-tools
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadOnlyBusinessTools
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt LedgerFlowKey.Arn
+              - Effect: Allow
+                Action:
+                  - s3vectors:GetIndex
+                  - s3vectors:QueryVectors
+                  - s3vectors:GetVectors
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  GatewayExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-gateway
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GatewayPolicyAuthorization
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:AuthorizeAction
+                  - bedrock-agentcore:PartiallyAuthorizeActions
+                  - bedrock-agentcore:GetPolicyEngine
+                Resource: '*'
+        - PolicyName: GatewayInvokeLedgerFlowTools
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:ledgerflow-${EnvironmentName}-*
+
+  WorkflowExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-workflow
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkflowAgentInvocation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:InvokeAgentRuntime
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt LedgerFlowKey.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  EvaluationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-evaluation
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AgentCoreEvaluationTelemetry
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+Outputs:
+  KmsKeyArn:
+    Description: LedgerFlow customer-managed KMS key ARN
+    Value: !GetAtt LedgerFlowKey.Arn
+  ArtifactBucketName:
+    Description: Artifact bucket used by packaging and deployment steps
+    Value: !Ref ArtifactBucket
+  RuntimeRepositoryUri:
+    Description: ECR repository URI for the AgentCore Runtime image
+    Value: !GetAtt AgentRepository.RepositoryUri
+  RuntimeExecutionRoleArn:
+    Description: AgentCore Runtime execution role ARN
+    Value: !GetAtt RuntimeExecutionRole.Arn
+  ToolsExecutionRoleArn:
+    Description: Lambda read-only tools execution role ARN
+    Value: !GetAtt ToolsExecutionRole.Arn
+  GatewayExecutionRoleArn:
+    Description: AgentCore Gateway execution role ARN
+    Value: !GetAtt GatewayExecutionRole.Arn
+  WorkflowExecutionRoleArn:
+    Description: Step Functions execution role ARN
+    Value: !GetAtt WorkflowExecutionRole.Arn
+  EvaluationExecutionRoleArn:
+    Description: AgentCore Evaluations execution role ARN
+    Value: !GetAtt EvaluationExecutionRole.Arn

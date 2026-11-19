@@ -1,0 +1,11 @@
+{
+  "Description": "CloudWatch observability parameters.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "StateMachineArn", "Value": "${CF_OUT_StateMachineArn}"},
+    {"Key": "WorkflowLogGroupName", "Value": "${CF_OUT_WorkflowLogGroupName}"},
+    {"Key": "RuntimeEndpointArn", "Value": "${CF_OUT_RuntimeEndpointArn}"},
+    {"Key": "EvaluationConfigArn", "Value": "${CF_OUT_EvaluationConfigArn}"},
+    {"Key": "LogRetentionDays", "Value": "${LOG_RETENTION_DAYS}", "Default": "30"}
+  ]
+}

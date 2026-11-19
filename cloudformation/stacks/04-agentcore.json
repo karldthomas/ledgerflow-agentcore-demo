@@ -1,0 +1,29 @@
+{
+  "Description": "AgentCore Runtime, Memory, Gateway, and Policy parameters.",
+  "Configuration": [
+    {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
+    {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
+    {"Key": "RuntimeImageUri", "Value": "${RUNTIME_IMAGE_URI}"},
+    {"Key": "ReasoningModelId", "Value": "${MODEL_ID}", "Default": "amazon.nova-micro-v1:0"},
+    {"Key": "EnableModelReasoning", "Value": "${ENABLE_MODEL_REASONING}", "Default": "ENABLED"},
+    {"Key": "RuntimeExecutionRoleArn", "Value": "${CF_OUT_RuntimeExecutionRoleArn}"},
+    {"Key": "GatewayExecutionRoleArn", "Value": "${CF_OUT_GatewayExecutionRoleArn}"},
+    {"Key": "GatewayPolicyMode", "Value": "${GATEWAY_POLICY_MODE}", "Default": "LOG_ONLY"},
+    {"Key": "PolicyEnforcementMode", "Value": "${POLICY_ENFORCEMENT_MODE}", "Default": "LOG_ONLY"},
+    {"Key": "MemoryEventExpiryDays", "Value": "${MEMORY_EVENT_EXPIRY_DAYS}", "Default": "30"},
+    {"Key": "VectorBucketName", "Value": "${CF_OUT_VectorBucketName}"},
+    {"Key": "VectorIndexName", "Value": "${CF_OUT_VectorIndexName}"},
+    {"Key": "RawDataBucketName", "Value": "${CF_OUT_RawDataBucketName}"},
+    {"Key": "ReportsBucketName", "Value": "${CF_OUT_ReportsBucketName}"},
+    {"Key": "WorkflowCheckpointsTableName", "Value": "${CF_OUT_WorkflowCheckpointsTableName}"},
+    {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
+    {"Key": "OperationLedgerTableName", "Value": "${CF_OUT_OperationLedgerTableName}"},
+    {"Key": "PromptSelectionsTableName", "Value": "${CF_OUT_PromptSelectionsTableName}"},
+    {"Key": "SearchIncidentsFunctionArn", "Value": "${CF_OUT_SearchIncidentsFunctionArn}"},
+    {"Key": "GetCustomerInvoicesFunctionArn", "Value": "${CF_OUT_GetCustomerInvoicesFunctionArn}"},
+    {"Key": "GetApplicationLogsFunctionArn", "Value": "${CF_OUT_GetApplicationLogsFunctionArn}"},
+    {"Key": "GetDeploymentsFunctionArn", "Value": "${CF_OUT_GetDeploymentsFunctionArn}"},
+    {"Key": "GetCurrentInvoiceStateFunctionArn", "Value": "${CF_OUT_GetCurrentInvoiceStateFunctionArn}"},
+    {"Key": "SearchEvidenceFunctionArn", "Value": "${CF_OUT_SearchEvidenceFunctionArn}"}
+  ]
+}

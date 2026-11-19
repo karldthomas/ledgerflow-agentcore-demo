@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a1224" />
+    <title>LedgerFlow Control Room</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/config.js"></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="noise"></div>
+    <main id="login-view" class="login-layout">
+      <section class="hero-panel">
+        <div class="eyebrow"><span class="pulse-dot"></span> LEDGERFLOW / CONTROL ROOM</div>
+        <h1>See the investigation think, search, and prove.</h1>
+        <p class="hero-copy">A tenant-aware incident workspace for following every evidence step from the first signal to the final report.</p>
+        <div class="hero-stats">
+          <div><strong>06</strong><span>read-only tools</span></div>
+          <div><strong>RRF</strong><span>hybrid retrieval</span></div>
+          <div><strong>01</strong><span>evidence trail</span></div>
+        </div>
+      </section>
+      <section class="auth-card card">
+        <div class="brand-mark">LF</div>
+        <div>
+          <p class="eyebrow">SECURE ACCESS</p>
+          <h2>Sign in to investigate</h2>
+          <p class="muted">Cognito controls access. User creation is restricted to administrators.</p>
+        </div>
+        <form id="login-form" class="stack-form">
+          <label>Email<input id="login-email" type="email" autocomplete="username" required placeholder="operator@example.com" /></label>
+          <label>Password<input id="login-password" type="password" autocomplete="current-password" required placeholder="••••••••" /></label>
+          <label id="new-password-wrap" class="hidden">New password<input id="new-password" type="password" autocomplete="new-password" placeholder="Choose a permanent password" /></label>
+          <button class="primary-button" type="submit"><span>Enter control room</span><span>↗</span></button>
+          <p id="login-error" class="form-error hidden"></p>
+        </form>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-shell hidden">
+      <header class="topbar">
+        <div class="topbar-brand"><div class="brand-mark small">LF</div><div><strong>LedgerFlow</strong><span>Control Room</span></div></div>
+        <div class="topbar-actions"><span id="user-chip" class="user-chip"></span><button id="signout-button" class="ghost-button">Sign out</button></div>
+      </header>
+
+      <section class="app-intro">
+        <div><p class="eyebrow">EVIDENCE-GROUNDED OPERATIONS</p><h1>Investigate with the whole trail in view.</h1><p class="muted intro-copy">Launch a read-only investigation, watch the workflow move, and inspect the prompts, tools, and evidence that shaped the report.</p></div>
+        <div id="connection-status" class="status-pill ready"><span></span> Runtime connected</div>
+      </section>
+
+      <nav class="workspace-tabs" aria-label="Control room sections">
+        <button class="workspace-tab active" type="button" data-tab="investigate">Investigation</button>
+        <button id="prompts-tab" class="workspace-tab hidden" type="button" data-tab="prompts">Prompt library</button>
+      </nav>
+
+      <section id="investigate-panel" class="workspace-grid tab-panel">
+        <aside class="left-rail">
+          <section class="card form-card">
+            <div class="section-heading"><div><p class="eyebrow">NEW INVESTIGATION</p><h2>Start a case</h2></div><span class="icon-orb">＋</span></div>
+            <form id="investigation-form" class="stack-form">
+              <label>Customer ID<input id="customer-id" value="ACME-482" required /></label>
+              <label>Incident ID <span class="optional">optional</span><input id="incident-id" value="INC-1042" placeholder="Let the agent find it" /></label>
+              <label>Tenant<input id="tenant-id" value="tenant_acme" required /></label>
+              <label>Investigation request<textarea id="request-text" rows="5">Investigate the duplicate invoice after the payment retry timeout.</textarea></label>
+              <button class="primary-button" type="submit"><span>Run investigation</span><span>→</span></button>
+              <p id="investigation-error" class="form-error hidden"></p>
+            </form>
+          </section>
+
+          <section id="admin-panel" class="card admin-card hidden">
+            <div class="section-heading"><div><p class="eyebrow">ADMIN ONLY</p><h2>User access</h2></div><span class="icon-orb amber">✦</span></div>
+            <p class="muted small-copy">Only Cognito users in the <code>admins</code> group can invite new users.</p>
+            <form id="user-form" class="stack-form compact-form">
+              <label>Email<input id="new-user-email" type="email" required placeholder="new.user@example.com" /></label>
+              <label>Tenant ID<input id="new-user-tenant" value="tenant_acme" required /></label>
+              <label>Group<select id="new-user-group"><option value="operators">operators</option><option value="admins">admins</option></select></label>
+              <button class="secondary-button" type="submit">Invite user</button>
+              <p id="user-error" class="form-error hidden"></p>
+            </form>
+            <div id="user-list" class="user-list"></div>
+          </section>
+        </aside>
+
+        <section class="main-stage">
+          <section class="card run-card">
+            <div class="run-header"><div><p class="eyebrow">ACTIVE RUN</p><h2 id="run-title">No investigation selected</h2></div><div id="run-status" class="status-pill idle"><span></span> Waiting</div></div>
+            <div id="run-meta" class="run-meta"><span>Submit a request to populate the evidence trail.</span></div>
+            <div id="flow-board" class="flow-board empty-flow"><div class="empty-state"><div class="empty-icon">◌</div><strong>Your investigation map will appear here</strong><span>Every checkpoint, tool call, and model decision will be placed on the timeline.</span></div></div>
+          </section>
+
+          <div class="detail-grid">
+            <section class="card detail-card">
+              <div class="section-heading"><div><p class="eyebrow">MODEL + TOOLS</p><h2>Reasoning inspector</h2></div><span class="detail-count" id="inspector-count">0</span></div>
+              <div id="inspector" class="inspector empty-detail"><span>Safe planning and synthesis summaries will appear here for every authenticated operator.</span></div>
+            </section>
+            <section class="card detail-card">
+              <div class="section-heading"><div><p class="eyebrow">EVENT STREAM</p><h2>Execution log</h2></div><div class="heading-actions"><span class="detail-count" id="event-count">0</span><button id="open-log-button" class="mini-button" type="button">Open log</button></div></div>
+              <div id="event-list" class="event-list empty-detail"><span>Waiting for an investigation.</span></div>
+            </section>
+          </div>
+
+          <section class="card report-card">
+            <div class="section-heading"><div><p class="eyebrow">FINAL OUTPUT</p><h2>Evidence-grounded report</h2></div><span id="report-confidence" class="confidence-badge">—</span></div>
+            <div id="report-view" class="report-view empty-detail"><span>Complete an investigation to see the report.</span></div>
+          </section>
+        </section>
+      </section>
+
+      <section id="prompts-panel" class="card prompts-panel tab-panel hidden">
+        <div class="section-heading">
+          <div><p class="eyebrow">ADMIN ONLY</p><h2>Prompt library</h2></div>
+          <div class="heading-actions"><a class="mini-button prompt-console-link" href="https://console.aws.amazon.com/bedrock/home?region=us-east-1#/prompts" target="_blank" rel="noopener">Open Bedrock</a><button id="refresh-prompts" class="mini-button" type="button">Refresh</button></div>
+        </div>
+        <p class="muted small-copy">View and edit the native Bedrock draft here, create new prompts, snapshot immutable versions, and choose the version used by the runtime stages. Keep <code>{{input}}</code> in a runtime prompt’s user template so the investigation data reaches the model.</p>
+        <p id="prompt-error" class="form-error hidden"></p>
+        <section class="new-prompt-card">
+          <div class="prompt-editor-heading"><div><p class="eyebrow">NEW NATIVE PROMPT</p><h3>Create a prompt</h3></div><span class="prompt-type-badge">Bedrock CHAT</span></div>
+          <form id="new-prompt-form" class="prompt-editor-form">
+            <div class="prompt-form-grid">
+              <label>Name<input id="new-prompt-name" required placeholder="incident-summary" /></label>
+              <label>Description<input id="new-prompt-description" placeholder="What this prompt is for" /></label>
+            </div>
+            <label>System instructions<textarea id="new-prompt-system" rows="5" placeholder="Optional instructions for the model"></textarea></label>
+            <label>User message template<textarea id="new-prompt-user" rows="4" required>{{input}}</textarea></label>
+            <div class="prompt-parameter-grid">
+              <label>Model ID<input id="new-prompt-model" value="amazon.nova-micro-v1:0" required /></label>
+              <label>Max tokens<input id="new-prompt-max-tokens" type="number" min="1" value="1000" required /></label>
+              <label>Temperature<input id="new-prompt-temperature" type="number" min="0" max="2" step="0.1" value="0" required /></label>
+            </div>
+            <button class="secondary-button" type="submit">Create prompt</button>
+          </form>
+        </section>
+        <div id="prompt-list" class="prompt-list"><span class="empty-detail">Loading prompt definitions…</span></div>
+      </section>
+    </main>
+
+    <div id="event-popover" class="popover-backdrop hidden" role="presentation">
+      <section class="event-popover card" role="dialog" aria-modal="true" aria-labelledby="event-popover-title">
+        <div class="popover-header"><div><p class="eyebrow">EXECUTION LOG</p><h2 id="event-popover-title">Inspect workflow events</h2><p class="muted small-copy">Select an event to view its structured payload. Prompts remain redacted for operators.</p></div><button id="close-event-popover" class="ghost-button" type="button" aria-label="Close execution log">Close</button></div>
+        <div class="popover-grid"><div id="event-popover-list" class="event-list popover-event-list"><span class="empty-detail">No execution events yet.</span></div><div id="event-popover-detail" class="event-detail empty-detail"><span>Select an event to inspect its structured payload.</span></div></div>
+      </section>
+    </div>
+  </body>
+</html>

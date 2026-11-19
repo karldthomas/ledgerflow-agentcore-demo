@@ -1,0 +1,15 @@
+.ledgerflow/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+.env
+.DS_Store
+*.log
+cloudformation/build/*
+!cloudformation/build/.gitkeep
