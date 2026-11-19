@@ -13,6 +13,12 @@ import json
 import os
 from typing import Any, Callable
 
+from .context_compaction import (
+    CompactedContext,
+    ContextCompactor,
+    ContextInvariantError,
+    validate_context,
+)
 from .models import IncidentReport
 from .prompting import PromptVersionResolver
 
@@ -107,9 +113,11 @@ class BedrockReportReasoner:
         prompt_default_arn: str | None = None,
         prompt_selection_table: Any | None = None,
         prompt_key: str = "synthesis",
+        context_token_budget: int = 8000,
     ) -> None:
         self.model_id = model_id
         self.max_tokens = max_tokens
+        self.context_compactor = ContextCompactor(max_tokens=context_token_budget)
         self.prompt_resolver = PromptVersionResolver(
             prompt_arn=prompt_arn,
             default_version_arn=prompt_default_arn,
@@ -137,20 +145,24 @@ class BedrockReportReasoner:
             raise ModelReasoningError("Bedrock response did not contain message text")
         return text
 
-    @staticmethod
-    def _packet(evidence: list[dict[str, Any]], memories: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build a bounded, data-only packet for the model prompt."""
+    def build_context(
+        self,
+        base_report: IncidentReport,
+        *,
+        evidence: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+        workflow_context: dict[str, Any] | None = None,
+    ) -> CompactedContext:
+        """Build the validated context used by the synthesis prompt."""
 
-        def trim(value: Any, limit: int = 4000) -> Any:
-            if isinstance(value, str):
-                return value[:limit]
-            if isinstance(value, dict):
-                return {str(key): trim(item, limit) for key, item in value.items()}
-            if isinstance(value, list):
-                return [trim(item, limit) for item in value[:25]]
-            return value
-
-        return {"evidence": trim(evidence), "memories": trim(memories)}
+        tenant_id = str((workflow_context or {}).get("tenant_id") or "unknown")
+        return self.context_compactor.compact(
+            base_report=base_report,
+            evidence=evidence,
+            memories=memories,
+            tenant_id=tenant_id,
+            workflow_context=workflow_context,
+        )
 
     def synthesize(
         self,
@@ -158,13 +170,24 @@ class BedrockReportReasoner:
         *,
         evidence: list[dict[str, Any]],
         memories: list[dict[str, Any]],
+        context: CompactedContext | None = None,
+        workflow_context: dict[str, Any] | None = None,
     ) -> IncidentReport:
-        allowed_ids = {str(item.get("id")) for item in evidence if item.get("id")}
-        allowed_ids.update(base_report.evidence_ids)
+        try:
+            context = context or self.build_context(
+                base_report,
+                evidence=evidence,
+                memories=memories,
+                workflow_context=workflow_context,
+            )
+            validate_context(context)
+        except ContextInvariantError as exc:
+            raise ModelReasoningError(f"context compaction failed: {exc}") from exc
+
+        allowed_ids = set(context.citable_evidence_ids)
         user = json.dumps(
             {
-                "ground_truth_candidate": base_report.to_dict(),
-                "collected_data": self._packet(evidence, memories),
+                "investigation_context": context.to_prompt_dict(),
                 "allowed_evidence_ids": sorted(allowed_ids),
             },
             sort_keys=True,
@@ -174,6 +197,11 @@ class BedrockReportReasoner:
             "event": "llm_synthesis_started",
             "model_id": self.model_id,
             "prompt_version_arn": prompt_version_arn,
+            "context_schema_version": context.schema_version,
+            "compaction_version": context.compaction_version,
+            "context_digest": context.digest,
+            "input_token_count": context.token_count,
+            "omitted_evidence_count": context.omitted_evidence_count,
             "prompt_variables_preview": user[:6000],
         })
         try:

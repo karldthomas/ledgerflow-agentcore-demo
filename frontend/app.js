@@ -8,6 +8,7 @@
     ["deployment_lookup", "Trace deployment"],
     ["retrieval", "Hybrid evidence search"],
     ["memory_lookup", "Recall verified memory"],
+    ["context_compaction", "Compact context"],
     ["report_synthesis", "Synthesize report"],
     ["completed", "Publish report"],
   ];
@@ -18,6 +19,7 @@
     get_deployments: "deployment_lookup",
     search_evidence: "retrieval",
     memory_lookup: "memory_lookup",
+    reasoning_compaction: "context_compaction",
     reasoning_plan: "started",
     reasoning_synthesis: "report_synthesis",
   };
@@ -56,6 +58,11 @@
       description: "Recalls eligible verified memory for the tenant without replacing primary evidence.",
       source: "AgentCore Memory",
       operation: "memory_lookup",
+    },
+    context_compaction: {
+      description: "Preserves safety invariants and cited evidence while reducing the model's working context.",
+      source: "Runtime compactor + optional Bedrock semantic pass",
+      operation: "context compaction",
     },
     report_synthesis: {
       description: "Builds the typed report from the authorized evidence packet and prepares durable publication.",
@@ -355,6 +362,12 @@
     document.body.classList.remove("modal-open");
   }
 
+  function reasoningTitle(item) {
+    if (item.event_type === "reasoning_plan") return "Plan summary";
+    if (item.event_type === "reasoning_compaction") return "Context compaction";
+    return "Synthesis summary";
+  }
+
   function renderEvents(events) {
     state.events = events || [];
     $("event-count").textContent = state.events.length;
@@ -363,11 +376,11 @@
       $("event-list").innerHTML = state.events.slice().reverse().map((item, reverseIndex) => eventRowMarkup(item, state.events.length - reverseIndex - 1)).join("");
       bindEventRows($("event-list"));
     }
-    const llm = state.events.filter((item) => ["reasoning_plan", "reasoning_synthesis"].includes(item.event_type));
+    const llm = state.events.filter((item) => ["reasoning_plan", "reasoning_compaction", "reasoning_synthesis"].includes(item.event_type));
     $("inspector-count").textContent = llm.length;
     if (!llm.length) { $("inspector").innerHTML = "<span>Safe planning and synthesis summaries will appear here for every authenticated operator.</span>"; return; }
     $("inspector").classList.remove("empty-detail");
-    $("inspector").innerHTML = llm.map((item) => `<div class="inspector-card"><div class="inspector-title"><span>${escapeHtml(item.event_type === "reasoning_plan" ? "Plan summary" : "Synthesis summary")}</span><span>${escapeHtml(item.status)}</span></div><pre>${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></div>`).join("");
+    $("inspector").innerHTML = llm.map((item) => `<div class="inspector-card"><div class="inspector-title"><span>${escapeHtml(reasoningTitle(item))}</span><span>${escapeHtml(item.status)}</span></div><pre>${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></div>`).join("");
   }
 
   function listMarkup(items) { return Array.isArray(items) ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""; }

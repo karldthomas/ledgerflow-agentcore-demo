@@ -814,6 +814,14 @@ class InvestigationSummary(BaseModel):
     failed_hypotheses: list[str]
 ```
 
+In the deployable repository, this contract is implemented without adding a
+local schema dependency: `ledgerflow/context_compaction.py` uses standard
+library dataclasses and JSON-compatible structures. `ContextCompactor` first
+selects a deterministic, tenant-scoped context and `validate_context` checks
+the invariants and citations. When enabled, `BedrockContextSummarizer` adds an
+optional semantic pass through the versioned native Bedrock context-compaction
+prompt; invalid output falls back to the deterministic context.
+
 ## Implementation Tasks
 
 1. Create an authoritative invariant store.
@@ -1124,6 +1132,17 @@ claim marks the plan consumed, so the retry cannot fail at the same stage
 again. The administrator can disarm an active plan from the same tab. The
 control is unavailable in production and does not require a CloudFormation
 toggle for each exercise.
+
+The important boundary is the ordering: the Runtime saves the stage result and
+the `completed_steps` set before it evaluates the failure plan. A failure after
+`log_lookup` therefore tests recovery from a known-good checkpoint rather than
+repeating the earlier incident, invoice, and log reads. On retry, the Runtime
+validates the state schema and tenant/customer ownership, acquires the workflow
+lease, restores the saved plan and records, and starts at the first incomplete
+stage. The operation ledger keeps report publication idempotent when the retry
+reaches the final step. The console exposes these transitions as checkpoint,
+failure, resumed, and completed events, while the Dev Tools history records the
+control's `ACTIVE` → `CONSUMED` or `DISARMED` lifecycle.
 
 ## Completion Criteria
 

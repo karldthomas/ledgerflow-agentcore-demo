@@ -28,6 +28,8 @@ PLANNER_PROMPT_ARN = os.environ.get("PLANNER_PROMPT_ARN", "")
 SYNTHESIS_PROMPT_ARN = os.environ.get("SYNTHESIS_PROMPT_ARN", "")
 PLANNER_PROMPT_DEFAULT_ARN = os.environ.get("PLANNER_PROMPT_DEFAULT_ARN", "")
 SYNTHESIS_PROMPT_DEFAULT_ARN = os.environ.get("SYNTHESIS_PROMPT_DEFAULT_ARN", "")
+CONTEXT_COMPACTION_PROMPT_ARN = os.environ.get("CONTEXT_COMPACTION_PROMPT_ARN", "")
+CONTEXT_COMPACTION_PROMPT_DEFAULT_ARN = os.environ.get("CONTEXT_COMPACTION_PROMPT_DEFAULT_ARN", "")
 PROMPT_NAME_PREFIX = f"ledgerflow-{ENVIRONMENT_NAME}-"
 DEFAULT_PROMPT_MODEL_ID = "amazon.nova-micro-v1:0"
 DEV_TOOLS_CONTROLS_TABLE_NAME = os.environ.get("DEV_TOOLS_CONTROLS_TABLE", "")
@@ -41,6 +43,7 @@ DEV_TOOL_STEPS = (
     "deployment_lookup",
     "retrieval",
     "memory_lookup",
+    "context_compaction",
     "report_synthesis",
 )
 WORKFLOW_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -438,6 +441,13 @@ def _runtime_prompt_definitions() -> dict[str, dict[str, Any]]:
             "default_arn": SYNTHESIS_PROMPT_DEFAULT_ARN,
             "runtime": True,
         },
+        "context_compaction": {
+            "label": "Context compaction",
+            "name": f"{PROMPT_NAME_PREFIX}context-compaction",
+            "arn": CONTEXT_COMPACTION_PROMPT_ARN,
+            "default_arn": CONTEXT_COMPACTION_PROMPT_DEFAULT_ARN,
+            "runtime": True,
+        },
     }
 
 
@@ -770,7 +780,7 @@ def _api(event: dict[str, Any], path: str, claims: dict[str, Any]) -> dict[str, 
         workflow_id = parts[2]
         if method == "GET":
             return _response(200, _get_investigation(workflow_id, claims))
-    if len(parts) == 4 and parts[:3] == ["api", "investigations"] and parts[3] == "events" and method == "GET":
+    if len(parts) == 4 and parts[:2] == ["api", "investigations"] and parts[3] == "events" and method == "GET":
         status = _get_investigation(parts[2], claims)
         return _response(200, {"workflow_id": parts[2], "events": status["events"]})
     if parts == ["api", "admin", "users"] and method == "GET":

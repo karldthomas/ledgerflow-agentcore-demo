@@ -539,7 +539,8 @@ Creates:
 - Gateway targets for the tool Lambdas;
 - AgentCore Runtime;
 - Runtime endpoint;
-- native Bedrock Prompt Management resources for planning and synthesis;
+- native Bedrock Prompt Management resources for planning, context compaction,
+  and synthesis;
 - initial immutable prompt versions created from those resources;
 - read-only Cedar Policy;
 - Runtime environment variables containing resolved resource names, prompt ARNs,
@@ -551,6 +552,9 @@ Inputs:
 RuntimeImageUri
 ReasoningModelId = ${MODEL_ID}                 optional
 EnableModelReasoning = ${ENABLE_MODEL_REASONING} (default DISABLED)
+ContextCompactionLlmEnabled = ${CONTEXT_COMPACTION_LLM_ENABLED} (default ENABLED)
+ContextTokenBudget = ${CONTEXT_TOKEN_BUDGET} (default 8000)
+ContextCompactionReservedTokens = ${CONTEXT_COMPACTION_RESERVED_TOKENS} (default 1200)
 FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED; legacy direct-payload compatibility guard)
 RuntimeExecutionRoleArn = ${CF_OUT_RuntimeExecutionRoleArn}
 GatewayExecutionRoleArn = ${CF_OUT_GatewayExecutionRoleArn}
@@ -696,6 +700,8 @@ PlannerPromptArn = ${CF_OUT_PlannerPromptArn}
 SynthesisPromptArn = ${CF_OUT_SynthesisPromptArn}
 PlannerPromptDefaultVersionArn = ${CF_OUT_PlannerPromptVersionArn}
 SynthesisPromptDefaultVersionArn = ${CF_OUT_SynthesisPromptVersionArn}
+ContextCompactionPromptArn = ${CF_OUT_ContextCompactionPromptArn}
+ContextCompactionPromptDefaultVersionArn = ${CF_OUT_ContextCompactionPromptVersionArn}
 BootstrapAdminEmail = ${BOOTSTRAP_ADMIN_EMAIL} (optional)
 ```
 
@@ -936,6 +942,51 @@ history changes from **ACTIVE** to **CONSUMED**. Click **Disarm** to cancel an
 armed plan before it is claimed. This control is intentionally available only
 in `dev` and `test`, and does not require changing CloudFormation for each
 exercise.
+
+#### Recovery mechanics
+
+The failure plan is a runtime control, not a workflow input or a CloudFormation
+toggle. The admin action writes an `ACTIVE` record to the
+`DevToolsControlsTable`, including the exact `workflow_id`, checkpoint, creator,
+and expiry. The table's `WorkflowStepIndex` lets the Runtime find the plan
+without scanning unrelated workflows. Plans are limited to one active plan for
+the same workflow and checkpoint and expire automatically.
+
+Each Runtime stage follows this order:
+
+1. collect the stage's result, if it has one;
+2. write the state and completed-step set to `WorkflowCheckpointsTable`;
+3. look for an active plan matching the current workflow and checkpoint;
+4. atomically mark the plan consumed and emit a `failure_injection` event; and
+5. raise the controlled failure after the checkpoint is durable.
+
+The selected checkpoint therefore determines the next retry boundary:
+
+| Console selection | Durable checkpoint | Retry begins with |
+| --- | --- | --- |
+| Request accepted | `started` | planning |
+| Find incident | `incident_lookup` | invoice lookup |
+| Check invoices | `invoice_lookup` | application-log lookup |
+| Read application logs | `log_lookup` | deployment lookup |
+| Trace deployment | `deployment_lookup` | hybrid evidence search |
+| Hybrid evidence search | `retrieval` | verified-memory lookup |
+| Recall verified memory | `memory_lookup` | report synthesis |
+| Synthesize report | `report_synthesis` | idempotent publication/completion |
+
+On retry, the Runtime uses the same workflow ID from the Step Functions payload
+and AgentCore session ID. It validates the checkpoint schema and tenant/customer
+ownership, acquires the conditional workflow lease, restores the saved plan and
+records, and emits a `resumed` event with the completed steps. Already completed
+Gateway, evidence, memory, and synthesis work is not invoked again. The final
+checkpoint is `COMPLETED`, the report is stored under the workflow ID, and the
+control remains **CONSUMED** as an audit record.
+
+The controlled failure releases the lease before raising so the retry can
+proceed immediately. A real process crash follows the same checkpoint protocol
+but leaves the lease to expire normally. If two workers race to recover, the
+workflow lease allows only one to continue. If the Dev Tools table is missing or
+temporarily unavailable, the Runtime fails closed for the optional test hook and
+continues normal investigations without injected failure.
 
 ### Step 8 — Deploy the web console
 

@@ -31,6 +31,10 @@ Parameters:
     Type: String
   SynthesisPromptDefaultVersionArn:
     Type: String
+  ContextCompactionPromptArn:
+    Type: String
+  ContextCompactionPromptDefaultVersionArn:
+    Type: String
   BootstrapAdminEmail:
     Type: String
     Default: ''
@@ -198,6 +202,8 @@ Resources:
           SYNTHESIS_PROMPT_ARN: !Ref SynthesisPromptArn
           PLANNER_PROMPT_DEFAULT_ARN: !Ref PlannerPromptDefaultVersionArn
           SYNTHESIS_PROMPT_DEFAULT_ARN: !Ref SynthesisPromptDefaultVersionArn
+          CONTEXT_COMPACTION_PROMPT_ARN: !Ref ContextCompactionPromptArn
+          CONTEXT_COMPACTION_PROMPT_DEFAULT_ARN: !Ref ContextCompactionPromptDefaultVersionArn
 
   WebApi:
     Type: AWS::ApiGatewayV2::Api

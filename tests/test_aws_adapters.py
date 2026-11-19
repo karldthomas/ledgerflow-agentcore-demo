@@ -438,6 +438,9 @@ def test_runtime_resumes_after_one_shot_checkpoint_failure(monkeypatch):
     assert report["incident_id"] == "INC-1042"
     assert checkpoint_table.item["CurrentStep"] == "completed"
     assert checkpoint_table.item["Status"] == "COMPLETED"
+    checkpoint_state = json.loads(checkpoint_table.item["Data"])
+    assert checkpoint_state["context_manifest"]["schema_version"] == "ledgerflow.context.v1"
+    assert "INC-1042" in checkpoint_state["context_manifest"]["selected_evidence_ids"]
     assert gateway.calls == [
         "search_incidents",
         "get_customer_invoices",

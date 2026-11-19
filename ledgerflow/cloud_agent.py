@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .context_compaction import (
+    BedrockContextSummarizer,
+    CompactedContext,
+    ContextCompactor,
+    ContextInvariantError,
+    ContextSummarizationError,
+)
 from .evidence_reasoning import build_evidence_report
 from .gateway import AgentCoreGatewayClient
 from .models import IncidentReport
@@ -58,6 +65,24 @@ class CloudInvestigationHandler:
         self.resumed = False
         self.reasoner: BedrockReportReasoner | None = None
         self.planner: BedrockInvestigationPlanner | None = None
+        try:
+            context_token_budget = max(100, int(os.environ.get("CONTEXT_TOKEN_BUDGET", "8000")))
+        except ValueError:
+            context_token_budget = 8000
+        semantic_compaction_enabled = os.environ.get("CONTEXT_COMPACTION_LLM_ENABLED", "ENABLED").upper() == "ENABLED"
+        try:
+            reserved_tokens = max(0, int(os.environ.get("CONTEXT_COMPACTION_RESERVED_TOKENS", "1200")))
+        except ValueError:
+            reserved_tokens = 1200
+        if not semantic_compaction_enabled:
+            reserved_tokens = 0
+        if reserved_tokens >= context_token_budget:
+            reserved_tokens = max(0, context_token_budget // 5)
+        self.context_compactor = ContextCompactor(
+            max_tokens=context_token_budget,
+            reserved_tokens=reserved_tokens,
+        )
+        self.context_summarizer: BedrockContextSummarizer | None = None
         if os.environ.get("MODEL_REASONING_ENABLED", "DISABLED").upper() == "ENABLED":
             model_id = os.environ.get("MODEL_ID", "").strip()
             if model_id:
@@ -79,6 +104,16 @@ class CloudInvestigationHandler:
                     prompt_default_arn=os.environ.get("PLANNER_PROMPT_DEFAULT_ARN"),
                     prompt_selection_table=selection_table,
                 )
+                compaction_prompt_arn = os.environ.get("CONTEXT_COMPACTION_PROMPT_ARN", "").strip()
+                if semantic_compaction_enabled and compaction_prompt_arn:
+                    self.context_summarizer = BedrockContextSummarizer(
+                        model_id=model_id,
+                        region=self.region,
+                        logger=self._compaction_event,
+                        prompt_arn=compaction_prompt_arn,
+                        prompt_default_arn=os.environ.get("CONTEXT_COMPACTION_PROMPT_DEFAULT_ARN"),
+                        prompt_selection_table=selection_table,
+                    )
 
     def _emit(
         self,
@@ -143,6 +178,25 @@ class CloudInvestigationHandler:
             {
                 "model_id": event.get("model_id"),
                 "stop_reason": event.get("stop_reason"),
+                "prompt_redacted": True,
+            },
+            visibility="operator",
+        )
+
+    def _compaction_event(self, event: dict[str, Any]) -> None:
+        """Record semantic compaction metadata without exposing raw prompts."""
+
+        event_name = str(event.get("event", ""))
+        status = "started" if event_name.endswith("_started") else "completed"
+        self._emit("llm_compaction", "context_compaction", status, event, visibility="admin")
+        self._emit(
+            "reasoning_compaction",
+            "context_compaction",
+            status,
+            {
+                "model_id": event.get("model_id"),
+                "context_digest": event.get("context_digest"),
+                "input_token_count": event.get("input_token_count"),
                 "prompt_redacted": True,
             },
             visibility="operator",
@@ -378,12 +432,13 @@ class CloudInvestigationHandler:
             try:
                 table.update_item(
                     Key={"ControlId": control_id},
-                    UpdateExpression="SET Consumed = :true, ConsumedAt = :updated, ConsumedBy = :worker, UpdatedAt = :updated",
+                    UpdateExpression="SET #consumed = :true, ConsumedAt = :updated, ConsumedBy = :worker, UpdatedAt = :updated",
                     ConditionExpression=(
-                        "Enabled = :enabled AND "
-                        "(attribute_not_exists(Consumed) OR Consumed = :false) AND "
+                        "#enabled = :enabled AND "
+                        "(attribute_not_exists(#consumed) OR #consumed = :false) AND "
                         "ExpiresAtEpoch > :now"
                     ),
+                    ExpressionAttributeNames={"#consumed": "Consumed", "#enabled": "Enabled"},
                     ExpressionAttributeValues={
                         ":true": True,
                         ":false": False,
@@ -417,6 +472,7 @@ class CloudInvestigationHandler:
             "deployment_lookup",
             "retrieval",
             "memory_lookup",
+            "context_compaction",
             "report_synthesis",
             "completed",
         }
@@ -602,6 +658,93 @@ class CloudInvestigationHandler:
                 {"reason": "model_planning_unavailable", "fallback_used": True, "plan": plan.to_dict(), "prompt_redacted": True},
             )
             return plan
+
+    def _compact_context(
+        self,
+        *,
+        report: IncidentReport,
+        evidence: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+        tenant_id: str,
+        workflow_id: str,
+        completed_steps: set[str],
+        plan: InvestigationPlan,
+        request: Any,
+    ) -> tuple[CompactedContext | None, str | None]:
+        """Build deterministic context, then optionally add LLM semantics."""
+
+        compactor = getattr(self, "context_compactor", None)
+        if compactor is None:
+            compactor = ContextCompactor(max_tokens=8000)
+            self.context_compactor = compactor
+        self._emit(
+            "context_compaction",
+            "context_compaction",
+            "started",
+            {
+                "mode": "deterministic",
+                "budget_tokens": compactor.max_tokens,
+                "completed_steps": sorted(completed_steps),
+            },
+        )
+        try:
+            context = compactor.compact(
+                base_report=report,
+                evidence=evidence,
+                memories=memories,
+                tenant_id=tenant_id,
+                workflow_context={
+                    "workflow_id": workflow_id,
+                    "current_step": "context_compaction",
+                    "completed_steps": sorted(completed_steps),
+                    "status": "RUNNING",
+                    "request": request,
+                    "plan": plan.to_dict(),
+                },
+            )
+        except ContextInvariantError as exc:
+            self._emit(
+                "context_compaction",
+                "context_compaction",
+                "failed",
+                {"mode": "deterministic", "error": str(exc), "fallback_used": True},
+            )
+            return None, str(exc)
+
+        self._emit(
+            "context_compaction",
+            "context_compaction",
+            "completed",
+            {
+                "mode": "deterministic",
+                **context.to_manifest(),
+            },
+        )
+        summarizer = getattr(self, "context_summarizer", None)
+        if summarizer is None:
+            return context, None
+        try:
+            enriched = summarizer.summarize(context)
+        except (ContextInvariantError, ContextSummarizationError) as exc:
+            self._emit(
+                "context_compaction",
+                "context_compaction",
+                "degraded",
+                {
+                    "mode": "llm",
+                    "error": str(exc),
+                    "fallback_used": True,
+                    "deterministic_digest": context.digest,
+                },
+            )
+            return context, None
+        self._emit(
+            "context_compaction",
+            "context_compaction",
+            "completed",
+            {"mode": "llm", **enriched.to_manifest()},
+        )
+        return enriched, None
 
     def _memory_records(self, tenant_id: str, subject_id: str, query: str) -> list[dict[str, Any]]:
         memory_id = os.environ.get("AGENTCORE_MEMORY_ID")
@@ -852,10 +995,52 @@ class CloudInvestigationHandler:
                 report = IncidentReport(**state["report"])
             else:
                 report = self._build_report(incident, invoices, logs, deployments, vector_items, memories, tenant_id)
-                if self.reasoner is not None:
-                    packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
+                packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
+                context, context_error = self._compact_context(
+                    report=report,
+                    evidence=packet,
+                    memories=memories,
+                    tenant_id=tenant_id,
+                    workflow_id=workflow_id,
+                    completed_steps=completed_steps,
+                    plan=plan,
+                    request=payload.get("request", ""),
+                )
+                state["context_manifest"] = (
+                    context.to_manifest()
+                    if context is not None
+                    else {
+                        "schema_version": "ledgerflow.context.v1",
+                        "status": "degraded",
+                        "error": context_error or "context compaction unavailable",
+                        "fallback_used": True,
+                    }
+                )
+                if "context_compaction" not in completed_steps:
+                    self._save_stage(
+                        workflow_id=workflow_id,
+                        customer_id=customer_id,
+                        step="context_compaction",
+                        state=state,
+                        completed_steps=completed_steps,
+                        failure_after_step=failure_after_step,
+                    )
+                if self.reasoner is not None and context is not None:
                     try:
-                        report = self.reasoner.synthesize(report, evidence=packet, memories=memories)
+                        report = self.reasoner.synthesize(
+                            report,
+                            evidence=packet,
+                            memories=memories,
+                            context=context,
+                            workflow_context={
+                                "workflow_id": workflow_id,
+                                "tenant_id": tenant_id,
+                                "current_step": "report_synthesis",
+                                "completed_steps": sorted(completed_steps),
+                                "request": payload.get("request", ""),
+                                "plan": plan.to_dict(),
+                            },
+                        )
                     except ModelReasoningError as exc:
                         print(json.dumps({"event": "model_reasoning_degraded", "error": str(exc)}))
                         self._emit(

@@ -76,6 +76,7 @@ deployment, not an application runtime.
 ```text
 ledgerflow/
   cloud_agent.py       AWS Runtime handler using Gateway, Memory, DynamoDB, and S3
+  context_compaction.py deterministic context envelope and optional Bedrock semantic pass
   db.py                deployment-only deterministic fixture generator
   evidence_reasoning.py  source normalization and typed evidence claims
   gateway.py            SigV4 MCP client for AgentCore Gateway
@@ -100,7 +101,7 @@ frontend/            Lambda-served control-room UI
 Dockerfile           AgentCore Runtime container boundary
 deploy-all.sh        one-command build, artifact, ingestion, and deployment entry point
 LICENSE              MIT license
-tests/              AWS adapter and CloudFormation contract tests
+tests/              context-compaction, AWS adapter, and CloudFormation contract tests
 ```
 
 ## Deployment path
@@ -153,6 +154,21 @@ needed for each test.
    Functions retries the same workflow, the Runtime skips completed stages,
    and the investigation finishes. The plan changes to **CONSUMED** in Dev
    tools.
+
+The selected step means “fail after saving this step,” not “fail before doing
+this step.” For example, selecting **Read application logs** preserves the
+incident, invoice, and log results; the retry resumes with deployment lookup.
+The Investigation timeline shows the first attempt's checkpoint and injected
+failure, followed by a `resumed` event and only the later work on retry.
+
+Under the hood, the plan is stored in the environment's DynamoDB Dev Tools
+table and keyed by the exact workflow ID plus checkpoint. The Runtime claims it
+with a conditional update, so only one concurrent worker can consume it. The
+workflow checkpoint stores the state, completed steps, schema version, lease,
+and report data. A retry rehydrates that record, validates its customer and
+tenant, acquires the workflow lease, and skips every completed step. Report
+publication uses the same workflow ID as its operation key, preventing a retry
+from publishing the report twice.
 
 To cancel a plan before it runs, click **Disarm** in the plan history. The
 control is restricted to `dev` and `test` deployments and is not available in
@@ -239,7 +255,8 @@ The deployed console has two views:
 - **Investigation** shows run status, checkpoint timeline hover/focus details,
   safe reasoning summaries, execution results, evidence IDs, and the final
   typed report.
-- **Prompt versions** is admin-only. It lists the planner and report-synthesis
+- **Prompt versions** is admin-only. It lists the planner, context-compaction,
+  and report-synthesis
   Bedrock Prompt Management resources, shows the active immutable version,
   creates new immutable versions from the native Bedrock draft, and lets an
   administrator choose the active runtime version.

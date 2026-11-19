@@ -46,6 +46,7 @@ payment failures, configuration errors, and duplicate invoices.
 | Runtime and reasoning | AgentCore Runtime, bounded Bedrock planning, and report synthesis |
 | Gateway and Policy | AgentCore Gateway and Policy |
 | Memory | AgentCore Memory |
+| Context compaction | Context invariants, bounded working context, and semantic compaction |
 | Checkpoints | Durable workflow design |
 | Tests and metrics | Evaluation plan |
 
@@ -474,7 +475,7 @@ normalize evidence and derive typed claims
 load current verified memories
       |
       v
-assemble bounded context
+compact context and validate invariants
       |
       v
 generate structured report
@@ -528,32 +529,119 @@ because it is semantically similar to the query.
 
 ## 7. Preserve context invariants
 
-The model’s conversation is not the authority for safety rules. Store the
+Context compaction is not simply asking the model to summarize its previous
+messages. It is a controlled transformation of the model's working packet.
+The original tool results remain the evidence source; the compacted packet is
+only a bounded view used for the next model call.
+
+The model's conversation is not the authority for safety rules. Store the
 invariants separately:
 
 ```json
 {
+  "tenant_id": "tenant_acme",
+  "read_only": true,
   "no_financial_writes": true,
   "require_evidence_for_findings": true,
   "require_approval_for_remediation": true
 }
 ```
 
-The context builder must reserve space for these values, current task state, and
-the final report. Optional history and evidence are selected by relevance and
-authority.
+The context builder reserves space for these values, current workflow state,
+typed claims, and the final report. Optional evidence and memory are selected
+by relevance, authority, and whether the record is already required by a
+citation. A source record can be omitted from the prompt while its durable
+source ID remains in the checkpoint manifest.
+
+### The implementation boundary
+
+The shared implementation is deliberately independent of AWS services:
+
+```text
+ledgerflow/context_compaction.py
+  ContextCompactor              deterministic selection and token budget
+  CompactedContext               versioned prompt and checkpoint contract
+  validate_context               invariant and citation checks
+  BedrockContextSummarizer      optional semantic LLM pass
+```
+
+`ledgerflow/cloud_agent.py` collects the evidence, creates the compacted
+context, and saves a `context_compaction` checkpoint. It then passes that
+context to `ledgerflow/reasoning.py`, which sends the bounded JSON packet to
+Bedrock. The manifest records the context digest, selected evidence IDs,
+omitted-record counts, and token estimate without duplicating the full prompt.
+
+The current implementation uses `ledgerflow.context.v1` and
+`ledgerflow.compaction.v1`. The default working-context budget is 8,000
+estimated tokens. The estimator is deterministic and dependency-free; the
+compactor accepts an exact provider-specific token counter when one is
+available.
 
 When context becomes too large, compact it into a structured summary containing:
 
 - completed steps;
-- key findings;
-- evidence references;
+- invariant and tenant boundaries;
+- typed facts, relationships, and hypotheses;
+- selected evidence records and citable source IDs;
+- omitted evidence counts and source-ID samples;
+- supporting memory records;
 - unresolved questions;
 - failed hypotheses.
 
-After compaction, validate that every invariant and citation remains available.
-Retrieved content may contain instructions, but those instructions are data;
-they cannot update the invariant store or Gateway Policy.
+After compaction, `validate_context` checks that every mandatory citation is
+still available, every claim cites a selected record, the tenant has not
+changed, the read-only invariant remains true, and the token budget is not
+exceeded. Retrieved content may contain instructions, but those instructions
+are data; they cannot update the invariant store or Gateway Policy.
+
+### Deterministic compaction versus LLM semantic compaction
+
+The deterministic pass decides what is safe to retain. It is responsible for
+tenant boundaries, required evidence, citations, token limits, and workflow
+state. This makes the safety-critical part repeatable and testable.
+
+When model reasoning is enabled and the native
+`ledgerflow-${EnvironmentName}-context-compaction` prompt is configured,
+Bedrock performs an optional semantic pass. It can group repeated events,
+describe relationships across records, identify candidate hypotheses, and
+write unresolved questions. Its output is required to cite IDs already in
+`citable_evidence_ids`; it cannot add evidence or change policy. Invalid,
+unavailable, or over-budget output falls back to the deterministic context.
+
+The semantic prompt is managed like the planner and synthesis prompts. An
+administrator can edit its Bedrock draft, create an immutable version, and
+activate the version from the Prompt library tab. The runtime records model
+metadata and the context digest, while operator-facing events redact the raw
+prompt.
+
+The result is therefore:
+
+```text
+durable evidence
+      |
+      v
+deterministic safety envelope
+      |
+      v
+optional LLM semantic summary
+      |
+      v
+deterministic validation and token check
+      |
+      v
+report synthesis
+```
+
+This keeps the LLM useful for meaning and compression without making it the
+authority for permissions, evidence identity, or durable state.
+
+### Forced compaction exercise
+
+Set a small `CONTEXT_TOKEN_BUDGET`, run an investigation with verbose logs,
+and inspect the `context_compaction` timeline stage. The reasoning inspector
+shows the selected count, omitted count, digest, and token estimate. The
+execution log retains the structured checkpoint payload, but does not expose
+private chain-of-thought.
 
 ## 8. Hydrate state after interruption
 
@@ -571,6 +659,7 @@ current_step
 completed_steps
 checkpoint_version
 schema_version
+context_manifest
 lease_owner
 lease_until
 pending_operation_id
@@ -583,7 +672,7 @@ On restart:
 2. load and validate the checkpoint;
 3. migrate or reject incompatible schema versions;
 4. reconcile any pending operation;
-5. rebuild the context from durable evidence;
+5. rebuild the context from durable evidence and the compaction manifest;
 6. resume from the last verified stage.
 
 The deployed Runtime implements this protocol with a versioned DynamoDB
@@ -595,6 +684,47 @@ that same ID. The first attempt fails after the durable checkpoint; the Step
 Functions retry reuses the ID, loads the saved plan and records, and continues
 with the next stage. The Dev tools record becomes **CONSUMED**, and an active
 plan can be **DISARMED** before it is claimed.
+
+The implemented failure plan is a small control plane around this checkpoint
+protocol:
+
+```text
+admin arms plan
+      |
+      v
+ACTIVE control: workflow_id + step + expiry
+      |
+      v
+stage result -> durable checkpoint -> conditional claim
+                                      |
+                         +------------+------------+
+                         |                         |
+                    claim succeeds            claim loses/runs out
+                         |                         |
+                  fail once after save       continue normally
+                         |
+                         v
+                 Step Functions retry
+                         |
+                         v
+              hydrate -> skip -> continue
+```
+
+The plan is stored in a DynamoDB table with a workflow/step index and a TTL.
+The Runtime only consults it in `dev` and `test`; it claims the record with a
+conditional update on `Enabled`, `Consumed`, and expiry. That makes the test
+repeatable without putting a failure flag in the investigation request and
+prevents two workers from consuming the same plan. A missing control table is
+treated as an unavailable optional test hook, so ordinary investigations do not
+depend on Dev Tools.
+
+Choose a checkpoint after the work whose retry behavior you want to inspect.
+For example, a failure after `log_lookup` leaves the incident, invoice, and
+log results in the checkpoint, while the retry starts at deployment lookup. The
+timeline and execution log expose the completed checkpoint, the injected
+failure, the resumed attempt, and the later tool results. This makes the
+recovery test observable rather than merely asserting that a final report was
+eventually returned.
 
 For this POC, all investigation tools are read-only. The operation ledger and
 reconciliation tests still model the boundary required before any financial
@@ -717,6 +847,7 @@ ledgerflow-agent/
   CASE_STUDY.md
   ledgerflow/
     cloud_agent.py
+    context_compaction.py
     db.py
     evidence_reasoning.py
     gateway.py
@@ -734,6 +865,7 @@ ledgerflow-agent/
     package_artifacts.py     Lambda packaging/upload helper
   lambda/tool_handler.py     read-only Gateway target handlers
   tests/
+    test_context_compaction.py
   Dockerfile
   pyproject.toml
   README.md
