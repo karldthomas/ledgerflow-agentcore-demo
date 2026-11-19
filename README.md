@@ -21,7 +21,7 @@ demonstrates:
 - stable-prefix cache accounting; and
 - durable checkpoints with resumable workflow state.
 
-The deployed Runtime stores its planner and report-synthesis instructions in
+The AWS Runtime stores its planner and report-synthesis instructions in
 Amazon Bedrock Prompt Management. Each investigation resolves an immutable
 prompt-version ARN at runtime. Administrators can view and edit native Bedrock
 drafts, create new prompts, create immutable versions, and choose the active
@@ -45,6 +45,15 @@ S3, S3 Vectors, Lambda, Step Functions, Cognito, API Gateway, and CloudWatch
 through independent CloudFormation stacks.
 
 ## Quick start
+
+Install the local development extras:
+
+```bash
+python3 -m pip install -e '.[dev]'
+```
+
+The local agent is deterministic and does not require AWS credentials. Run it
+from the repository root:
 
 ```bash
 python3 -m ledgerflow.cli seed --reset
@@ -112,6 +121,7 @@ ledgerflow/
   reasoning.py      optional Bedrock Converse synthesis with citation checks
 cloudformation/
   stacks/            matching YAML templates and JSON parameter mappings
+  scripts/           deployment configuration and stack-validation helpers
   deploy.py          explicit plan/change-set/execute orchestrator
   validate.py        no-AWS deployment-contract validator
   ingest.py          fixture-to-DynamoDB/S3/S3-Vectors loader
@@ -123,6 +133,7 @@ lambda/
 frontend/            Lambda-served control-room UI
 Dockerfile           AgentCore Runtime container boundary
 deploy-all.sh        one-command build, artifact, ingestion, and deployment entry point
+LICENSE              MIT license
 tests/              regression tests for the seven concepts
 ```
 
@@ -144,6 +155,22 @@ cross-account dependencies.
 
 The deployed console URL is environment-specific. The deployment script prints
 the URL after Stack 07 completes; it requires Cognito authentication.
+
+For a complete development deployment, install `boto3` locally and provide
+ambient AWS credentials:
+
+```bash
+python3 -m pip install --user boto3
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+./deploy-all.sh --environment dev
+```
+
+`AWS_SESSION_TOKEN` is also supported for temporary credentials. The script
+does not select or require an AWS profile. It builds the Linux/arm64 Runtime
+image, packages the Lambda and web artifacts, loads the deterministic fixture
+corpus, deploys all eight stacks, and prints the authenticated console URL.
 
 ## Architecture
 
@@ -210,15 +237,35 @@ evidence identity. The schema-driven evidence layer derives the report's typed
 claims from the collected records, and model synthesis may only preserve
 claims and citations that belong to the authorized evidence packet.
 Those concerns are owned by the authorization layer, memory service, context
-builder, evidence analyzer, and checkpoint store. The agent can recommend remediation, but the
-POC has no financial-write tool and explicitly rejects attempts to add one.
+builder, evidence analyzer, and checkpoint store. The agent can recommend
+remediation, but the POC has no financial-write tool and explicitly rejects
+attempts to add one.
+
+## Console and prompt management
+
+The deployed console has two views:
+
+- **Investigation** shows run status, checkpoint timeline hover/focus details,
+  safe reasoning summaries, execution results, evidence IDs, and the final
+  typed report.
+- **Prompt versions** is admin-only. It lists the planner and report-synthesis
+  Bedrock Prompt Management resources, shows the active immutable version,
+  creates new immutable versions from the native Bedrock draft, and lets an
+  administrator choose the active runtime version.
+
+Prompt bodies are intentionally not copied into the application repository or
+stored in the application database. Bedrock owns the editable draft and
+immutable versions; the application stores only the selected version ARN and
+audit metadata. Edit or create prompts in the Prompt library view, use **Open
+Bedrock** when you need the native AWS console, then refresh the view and
+activate the immutable version used by the runtime.
 
 ## AWS steps that require an account
 
 The complete development deployment can be run from the repository root with:
 
 ```bash
-./deploy-all.sh
+BOOTSTRAP_ADMIN_EMAIL=admin@example.com ./deploy-all.sh --environment dev
 ```
 
 The script runs tests and contract validation, creates the ECR/artifact
@@ -235,9 +282,15 @@ The deployment uses the standard ambient AWS environment variables, including
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
 `AWS_REGION`; no AWS profile is selected by the script.
 
+Useful options are `--environment`, `--region`, `--vector-dimension`, and
+`--release-id`. Controlled follow-up deployments can use `--skip-ingest`,
+`--skip-tests`, or `--skip-validation`. Run `./deploy-all.sh --help` for the
+complete list.
+
 General-purpose S3 buckets use AWS account-regional namespaces rather than
 CloudFormation-generated global names. Their prefixes are environment-scoped,
-and AWS appends the account/Region suffix automatically.
+and AWS appends the account/Region suffix automatically. The S3 Vectors bucket
+uses an environment-scoped name that is unique within the account and Region.
 
 Use the detailed reviewable procedure in [`DEPLOYMENT.md`](DEPLOYMENT.md) when
 change sets must be inspected before execution.
@@ -251,5 +304,20 @@ change sets must be inspected before execution.
    change `MODEL_ID` only after verifying model access and report quality.
 5. Add production tracing, cost telemetry, and a measured reranker.
 
-The script also accepts `--skip-ingest` for code-only redeployments and
-`--skip-tests`/`--skip-validation` for controlled follow-up deployments.
+## Verification
+
+The repository's local checks are:
+
+```bash
+python3 -m pytest
+python3 cloudformation/validate.py
+bash -n deploy-all.sh
+node --check frontend/app.js
+```
+
+The current fixture suite covers 21 regression tests, and the deployment
+validator checks all eight independent CloudFormation stack contracts.
+
+## License
+
+LedgerFlow is released under the [MIT License](LICENSE).
