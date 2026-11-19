@@ -6,6 +6,7 @@
     {"Key": "RuntimeImageUri", "Value": "${RUNTIME_IMAGE_URI}"},
     {"Key": "ReasoningModelId", "Value": "${MODEL_ID}", "Default": "amazon.nova-micro-v1:0"},
     {"Key": "EnableModelReasoning", "Value": "${ENABLE_MODEL_REASONING}", "Default": "ENABLED"},
+    {"Key": "FailureInjectionEnabled", "Value": "${FAILURE_INJECTION_ENABLED}", "Default": "DISABLED"},
     {"Key": "RuntimeExecutionRoleArn", "Value": "${CF_OUT_RuntimeExecutionRoleArn}"},
     {"Key": "GatewayExecutionRoleArn", "Value": "${CF_OUT_GatewayExecutionRoleArn}"},
     {"Key": "GatewayPolicyMode", "Value": "${GATEWAY_POLICY_MODE}", "Default": "LOG_ONLY"},

@@ -1,4 +1,4 @@
-"""SQLite schema and deterministic synthetic data for the local POC."""
+"""Deterministic deployment fixtures staged through an in-memory SQLite store."""
 
 from __future__ import annotations
 
@@ -257,9 +257,9 @@ EXTRA_ACME_CASES: tuple[dict[str, str], ...] = (
 
 
 class Database:
-    """A small persistent SQLite database with one connection per POC object."""
+    """A fixture staging store with an in-memory default."""
 
-    def __init__(self, path: str | Path = ".ledgerflow/ledgerflow.db") -> None:
+    def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)

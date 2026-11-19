@@ -8,6 +8,7 @@
     ["deployment_lookup", "Trace deployment"],
     ["retrieval", "Hybrid evidence search"],
     ["memory_lookup", "Recall verified memory"],
+    ["report_synthesis", "Synthesize report"],
     ["completed", "Publish report"],
   ];
   const FLOW_EVENT_MAP = {
@@ -18,7 +19,7 @@
     search_evidence: "retrieval",
     memory_lookup: "memory_lookup",
     reasoning_plan: "started",
-    reasoning_synthesis: "completed",
+    reasoning_synthesis: "report_synthesis",
   };
   const FLOW_DETAILS = {
     started: {
@@ -56,10 +57,15 @@
       source: "AgentCore Memory",
       operation: "memory_lookup",
     },
+    report_synthesis: {
+      description: "Builds the typed report from the authorized evidence packet and prepares durable publication.",
+      source: "Runtime + Bedrock",
+      operation: "report synthesis",
+    },
     completed: {
-      description: "Synthesizes the authorized evidence packet and publishes the final report.",
+      description: "Publishes the prepared report and records the completed workflow checkpoint.",
       source: "Report store",
-      operation: "report synthesis + publication",
+      operation: "report publication",
     },
   };
   const state = { accessToken: null, idToken: null, claims: {}, challengeSession: null, workflowId: null, timer: null, events: [] };

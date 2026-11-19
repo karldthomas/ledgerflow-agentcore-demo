@@ -14,14 +14,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-from .models import Evidence, IncidentReport
+from .models import IncidentReport
 
 
 EVIDENCE_SCHEMA_VERSION = "ledgerflow.evidence.v2"
 
-# These aliases are the contract between the DynamoDB adapter, the local
-# SQLite adapter, and the report builder.  The reasoning code should not need
-# to know which persistence layer supplied a record.
+# These aliases are the contract between AWS source adapters and the report
+# builder. The reasoning code should not need to know which service supplied a
+# record.
 SOURCE_SCHEMA: dict[str, dict[str, tuple[str, ...]]] = {
     "incident": {
         "id": ("IncidentId", "incident_id", "evidence_id"),
@@ -88,19 +88,8 @@ class EvidenceAnalysis:
 
 
 def _record(item: Any) -> dict[str, Any]:
-    """Convert local Evidence or an AWS record to a flat mapping."""
+    """Normalize an AWS source record into the shared evidence mapping."""
 
-    if isinstance(item, Evidence):
-        value = {
-            "evidence_id": item.evidence_id,
-            "source_type": item.source_type,
-            "title": item.title,
-            "content": item.content,
-            "tenant_id": item.tenant_id,
-            "observed_at": item.observed_at,
-        }
-        value.update(item.metadata)
-        return value
     if isinstance(item, Mapping):
         value = dict(item)
         metadata = value.get("metadata")
@@ -147,8 +136,6 @@ def _payload(item: Mapping[str, Any]) -> dict[str, Any]:
             value = {}
         else:
             return dict(parsed) if isinstance(parsed, Mapping) else {}
-    # The local read-only adapter flattens log payload fields into Evidence
-    # metadata. Reconstruct the payload contract before applying rules.
     payload_keys = {
         "amount_cents",
         "attempt",
@@ -169,7 +156,7 @@ def _identifier(item: Mapping[str, Any], source: str) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-def build_evidence_query(incident: Mapping[str, Any] | Evidence, logs: Iterable[Mapping[str, Any] | Evidence] = ()) -> str:
+def build_evidence_query(incident: Mapping[str, Any], logs: Iterable[Mapping[str, Any]] = ()) -> str:
     """Build a high-signal retrieval query from the source schema."""
 
     incident_record = _record(incident)
@@ -215,12 +202,12 @@ def _contains_failure(value: Any) -> bool:
 
 def analyze_evidence(
     *,
-    incident: Mapping[str, Any] | Evidence,
-    invoices: Iterable[Mapping[str, Any] | Evidence],
-    logs: Iterable[Mapping[str, Any] | Evidence],
-    deployments: Iterable[Mapping[str, Any] | Evidence],
-    vectors: Iterable[Mapping[str, Any] | Evidence],
-    memories: Iterable[Mapping[str, Any] | Evidence] = (),
+    incident: Mapping[str, Any],
+    invoices: Iterable[Mapping[str, Any]],
+    logs: Iterable[Mapping[str, Any]],
+    deployments: Iterable[Mapping[str, Any]],
+    vectors: Iterable[Mapping[str, Any]],
+    memories: Iterable[Mapping[str, Any]] = (),
     tenant_id: str = "",
 ) -> EvidenceAnalysis:
     """Derive typed evidence claims without relying on fixture identifiers."""
@@ -550,12 +537,12 @@ def _timeline(analysis: EvidenceAnalysis) -> list[str]:
 
 def build_evidence_report(
     *,
-    incident: Mapping[str, Any] | Evidence,
-    invoices: Iterable[Mapping[str, Any] | Evidence],
-    logs: Iterable[Mapping[str, Any] | Evidence],
-    deployments: Iterable[Mapping[str, Any] | Evidence],
-    vectors: Iterable[Mapping[str, Any] | Evidence],
-    memories: Iterable[Mapping[str, Any] | Evidence] = (),
+    incident: Mapping[str, Any],
+    invoices: Iterable[Mapping[str, Any]],
+    logs: Iterable[Mapping[str, Any]],
+    deployments: Iterable[Mapping[str, Any]],
+    vectors: Iterable[Mapping[str, Any]],
+    memories: Iterable[Mapping[str, Any]] = (),
     tenant_id: str = "",
     task_type: str = "investigation",
     recovery_history: Iterable[str] = (),

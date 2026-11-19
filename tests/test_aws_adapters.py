@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ledgerflow.gateway import AgentCoreGatewayClient
-from ledgerflow.cloud_agent import CloudInvestigationHandler
+from ledgerflow.cloud_agent import CloudInvestigationHandler, DeterministicFailure
 from ledgerflow.models import IncidentReport
 from ledgerflow.prompting import PromptVersionResolver
 from ledgerflow.reasoning import BedrockReportReasoner
+from ledgerflow.runtime_entry import RuntimeHandler
 
 
 class _Response:
@@ -22,6 +25,147 @@ class _Response:
 
     def __exit__(self, *_args):
         return False
+
+
+class _ConditionalFailure(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _CheckpointTable:
+    def __init__(self):
+        self.item: dict[str, object] | None = None
+
+    def get_item(self, **_kwargs):
+        return {"Item": dict(self.item)} if self.item else {}
+
+    def update_item(self, *, ExpressionAttributeValues, UpdateExpression, ConditionExpression=None, **_kwargs):
+        values = ExpressionAttributeValues
+        if UpdateExpression.startswith("REMOVE"):
+            if self.item and self.item.get("LeaseOwner") != values[":owner"]:
+                raise _ConditionalFailure()
+            if self.item:
+                self.item.pop("LeaseOwner", None)
+                self.item.pop("LeaseExpiresAt", None)
+            return {}
+
+        if ConditionExpression and "LeaseOwner" in ConditionExpression:
+            now = int(values.get(":now", values.get(":lease_now", 0)))
+            lease_owner = self.item.get("LeaseOwner") if self.item else None
+            lease_expires = int(self.item.get("LeaseExpiresAt", 0)) if self.item else 0
+            allowed = not lease_owner or lease_expires < now or lease_owner == values[":owner"]
+            if not allowed:
+                raise _ConditionalFailure()
+
+        if self.item is None:
+            self.item = {}
+        if ":zero" in values:
+            self.item["CheckpointVersion"] = int(self.item.get("CheckpointVersion", 0)) + 1
+            self.item.update(
+                {
+                    "CustomerId": values[":customer"],
+                    "TenantId": values[":tenant"],
+                    "CurrentStep": values[":step"],
+                    "Data": values[":data"],
+                    "CompletedSteps": values[":completed"],
+                    "StateSchemaVersion": values[":schema"],
+                    "Status": values[":status"],
+                    "FailureInjectionConsumed": values[":failure_consumed"],
+                    "UpdatedAt": values[":updated"],
+                    "LeaseOwner": values[":owner"],
+                    "LeaseExpiresAt": values[":lease_expires"],
+                }
+            )
+        else:
+            self.item.update(
+                {
+                    "CustomerId": values[":customer"],
+                    "TenantId": values[":tenant"],
+                    "StateSchemaVersion": values[":schema"],
+                    "Status": values[":status"],
+                    "LeaseOwner": values[":owner"],
+                    "LeaseExpiresAt": values[":expires"],
+                }
+            )
+        return {}
+
+
+class _DynamoResource:
+    def __init__(self, checkpoint_table):
+        self.checkpoint_table = checkpoint_table
+
+    def Table(self, _name):
+        return self.checkpoint_table
+
+
+class _InvestigationGateway:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def call_tool(self, name, _arguments):
+        tool = name.split("___", 1)[-1]
+        self.calls.append(tool)
+        responses = {
+            "search_incidents": {
+                "items": [
+                    {
+                        "IncidentId": "INC-1042",
+                        "CustomerId": "ACME-482",
+                        "TenantId": "tenant_acme",
+                        "Category": "duplicate_invoice",
+                        "Description": "Customer received two invoices for one renewal.",
+                        "DeploymentVersion": "3.8.2",
+                        "CreatedAt": "2026-11-15T10:45:00+00:00",
+                    }
+                ]
+            },
+            "get_customer_invoices": {
+                "items": [
+                    {"InvoiceId": "INV-8821", "CustomerId": "ACME-482", "RenewalId": "REN-2026-11"},
+                    {"InvoiceId": "INV-8822", "CustomerId": "ACME-482", "RenewalId": "REN-2026-11"},
+                ]
+            },
+            "get_application_logs": {
+                "items": [
+                    {
+                        "LogId": "LOG-8821",
+                        "CustomerId": "ACME-482",
+                        "Timestamp": "2026-11-15T10:42:04+00:00",
+                        "Service": "payment-retry-handler",
+                        "Event": "payment_timeout",
+                        "PayloadJson": {
+                            "original_idempotency_key": "pay_1",
+                            "retry_idempotency_key": "pay_2",
+                        },
+                    }
+                ]
+            },
+            "get_deployments": {
+                "items": [
+                    {
+                        "DeploymentId": "DEP-382",
+                        "Version": "3.8.2",
+                        "DeployedAt": "2026-11-14T18:00:00+00:00",
+                        "Service": "payment-retry-handler",
+                        "ChangeSummary": "Retry key is regenerated after a timeout.",
+                    }
+                ]
+            },
+            "search_evidence": {
+                "items": [
+                    {
+                        "key": "RUNBOOK-014#0",
+                        "metadata": {
+                            "document_id": "RUNBOOK-014",
+                            "source_id": "RUNBOOK-014",
+                            "source_type": "runbook",
+                            "title": "Idempotent Retry Handling",
+                            "text": "Retries reuse the original idempotency key.",
+                        },
+                    }
+                ]
+            },
+        }
+        return responses[tool]
 
 
 def test_gateway_initializes_mcp_session_and_reuses_session_header(monkeypatch):
@@ -188,4 +332,97 @@ def test_result_previews_are_bounded_and_allowlisted():
             "Event": "retry_attempt",
             "PayloadJson": {"original_idempotency_key": "pay_1", "retry_idempotency_key": "pay_2"},
         }
+    ]
+
+
+def test_runtime_entry_delegates_to_the_aws_handler_only(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Handler:
+        def __init__(self):
+            calls.append({"event": "init"})
+
+        def handle(self, payload):
+            calls.append({"event": "handle", "payload": payload})
+            return {"status": "ok"}
+
+    monkeypatch.setattr("ledgerflow.runtime_entry.CloudInvestigationHandler", _Handler)
+    runtime = RuntimeHandler()
+
+    assert runtime.handle_invocation({"customer_id": "ACME-482"}) == {"status": "ok"}
+    runtime.close()
+    assert calls == [
+        {"event": "init"},
+        {"event": "handle", "payload": {"customer_id": "ACME-482"}},
+    ]
+
+
+def test_runtime_resumes_after_one_shot_checkpoint_failure(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_CHECKPOINTS_TABLE", "checkpoints")
+    monkeypatch.setenv("LEDGERFLOW_ENABLE_FAILURE_INJECTION", "ENABLED")
+    monkeypatch.delenv("WORKFLOW_EVENTS_TABLE", raising=False)
+    monkeypatch.delenv("OPERATION_LEDGER_TABLE", raising=False)
+    monkeypatch.delenv("REPORTS_BUCKET", raising=False)
+    monkeypatch.delenv("AGENTCORE_MEMORY_ID", raising=False)
+
+    checkpoint_table = _CheckpointTable()
+    gateway = _InvestigationGateway()
+    handler = object.__new__(CloudInvestigationHandler)
+    handler.dynamodb = _DynamoResource(checkpoint_table)
+    handler.gateway = gateway
+    handler.reasoner = None
+    handler.planner = None
+    handler.memory = None
+    handler.s3 = None
+    handler.worker_id = "test-worker"
+    handler.lease_seconds = 5
+
+    payload = {
+        "workflow_id": "recovery-demo-1",
+        "customer_id": "ACME-482",
+        "tenant_id": "tenant_acme",
+        "request": "Investigate the duplicate invoice.",
+        "failure_after_step": "log_lookup",
+    }
+
+    with pytest.raises(DeterministicFailure, match="log_lookup"):
+        handler.handle(payload)
+
+    assert checkpoint_table.item["CurrentStep"] == "log_lookup"
+    assert "log_lookup" in checkpoint_table.item["CompletedSteps"]
+    assert checkpoint_table.item["FailureInjectionConsumed"] is True
+    assert gateway.calls == ["search_incidents", "get_customer_invoices", "get_application_logs"]
+
+    resumed_handler = object.__new__(CloudInvestigationHandler)
+    resumed_handler.dynamodb = _DynamoResource(checkpoint_table)
+    resumed_handler.gateway = gateway
+    resumed_handler.reasoner = None
+    resumed_handler.planner = None
+    resumed_handler.memory = None
+    resumed_handler.s3 = None
+    resumed_handler.worker_id = "restarted-worker"
+    resumed_handler.lease_seconds = 5
+
+    report = resumed_handler.handle(payload)
+
+    assert report["incident_id"] == "INC-1042"
+    assert checkpoint_table.item["CurrentStep"] == "completed"
+    assert checkpoint_table.item["Status"] == "COMPLETED"
+    assert gateway.calls == [
+        "search_incidents",
+        "get_customer_invoices",
+        "get_application_logs",
+        "get_deployments",
+        "search_evidence",
+    ]
+
+    # A completed workflow is hydrated from its checkpoint instead of
+    # invoking any evidence tools again.
+    assert resumed_handler.handle(payload) == report
+    assert gateway.calls == [
+        "search_incidents",
+        "get_customer_invoices",
+        "get_application_logs",
+        "get_deployments",
+        "search_evidence",
     ]

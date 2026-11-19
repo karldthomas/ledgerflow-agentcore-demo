@@ -3,12 +3,12 @@
 Status: implementation deployed in the development environment; AWS changes
 remain explicit through CloudFormation change sets.
 
-The repository contains the local vertical slice, the AWS-backed Runtime
-adapter, eight independent CloudFormation stacks, the JSON/context deployment
-orchestrator, S3 Vectors ingestion and hybrid retrieval, a Cognito-protected
-Lambda-served console, bounded Bedrock planning/report synthesis, schema-driven
-evidence claims, and regression tests. The development resources are deployed;
-the first Cognito admin remains an explicit bootstrap input.
+The repository contains the deployable AWS Runtime, eight independent
+CloudFormation stacks, the JSON/context deployment orchestrator, S3 Vectors
+ingestion and hybrid retrieval, a Cognito-protected Lambda-served console,
+bounded Bedrock planning/report synthesis, schema-driven evidence claims, and
+regression tests. The development resources are deployed; the first Cognito
+admin remains an explicit bootstrap input.
 
 The current deterministic seed contains 21 evidence documents, 112 incidents,
 212 customers, 215 invoices, 5,030 application logs, and 42 deployments. The
@@ -29,9 +29,10 @@ evidence index will use Amazon S3 Vectors rather than OpenSearch.
 ## Architecture decision
 
 Use AgentCore Runtime with the checked-in LedgerFlow orchestrator as the
-primary implementation. The image keeps a deterministic fallback for tests,
-while the development deployment enables a bounded Bedrock Converse planner
-and evidence-grounded report synthesizer with `MODEL_ID` and
+primary implementation. The image keeps deterministic evidence-grounded report
+construction as a safe fallback when model synthesis is unavailable, while the
+development deployment enables a bounded Bedrock Converse planner and
+evidence-grounded report synthesizer with `MODEL_ID` and
 `ENABLE_MODEL_REASONING=ENABLED`. The same boundary can be replaced by Strands
 without changing Gateway, retrieval, memory, or checkpoint contracts.
 
@@ -318,20 +319,20 @@ while this case study specifically evaluates lexical plus semantic retrieval.
 
 The checked-in Runtime application executes the investigation stages explicitly:
 
-- classify the task;
-- select the retrieval policy;
+- resolve the bounded investigation plan;
 - call read-only tools through Gateway;
-- assemble and budget context;
-- compact history when necessary;
+- load tenant-scoped AgentCore Memory;
 - normalize source records into the versioned evidence schema;
 - derive typed facts, relationships, hypotheses, and unresolved questions;
+- build a bounded evidence packet for Bedrock;
 - produce the structured incident report;
 - save checkpoints after each major stage.
 
 The default report builder is deterministic and evidence-grounded. The shared
 `ledgerflow/evidence_reasoning.py` layer uses `ledgerflow.evidence.v2` to
-normalize SQLite and AWS records, build high-signal evidence queries, derive
-typed claims, and select deployment evidence relative to the incident time.
+normalize equivalent AWS source fields, build high-signal evidence queries,
+derive typed claims, and select deployment evidence relative to the incident
+time.
 When model reasoning is enabled, `ledgerflow/reasoning.py` sends only the
 already-collected evidence packet to Bedrock Converse, filters returned
 citations and typed claims against the allowed IDs, removes financial-write
@@ -339,8 +340,8 @@ recommendations, and falls back to the deterministic report if the model
 response is invalid or unavailable.
 
 Use `workflow_id` as the AgentCore session identifier so a resumed workflow can
-rebuild the same logical investigation context. A Strands implementation can
-reuse this same application boundary later; it is not required to validate the
+reconcile the same logical investigation. A Strands implementation can reuse
+this same application boundary later; it is not required to validate the
 current POC.
 
 ### AgentCore Gateway and Policy

@@ -5,16 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ledgerflow-agent"
 version = "0.1.0"
-description = "A dependency-light, local POC for an evidence-grounded incident response agent"
+description = "A deployable evidence-grounded incident response agent with a dependency-light local reference mode"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-
-[project.scripts]
-ledgerflow = "ledgerflow.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["ledgerflow*"]

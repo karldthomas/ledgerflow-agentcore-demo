@@ -59,7 +59,7 @@ Resources:
                 "Payload.$": "States.JsonToString($)"
               },
               "Retry": [
-                {"ErrorEquals": ["States.Timeout", "States.TaskFailed", "States.ServiceUnavailable"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2.0}
+                {"ErrorEquals": ["States.Timeout", "States.TaskFailed", "States.ServiceUnavailable"], "IntervalSeconds": 15, "MaxAttempts": 5, "BackoffRate": 2.0}
               ],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "InvestigationFailed"}],
               "ResultPath": "$.agent_result",

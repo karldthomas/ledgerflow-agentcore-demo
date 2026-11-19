@@ -549,6 +549,7 @@ Inputs:
 RuntimeImageUri
 ReasoningModelId = ${MODEL_ID}                 optional
 EnableModelReasoning = ${ENABLE_MODEL_REASONING} (default DISABLED)
+FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED)
 RuntimeExecutionRoleArn = ${CF_OUT_RuntimeExecutionRoleArn}
 GatewayExecutionRoleArn = ${CF_OUT_GatewayExecutionRoleArn}
 GatewayPolicyMode = ${GATEWAY_POLICY_MODE}
@@ -765,7 +766,7 @@ Before deploying:
 ### One-command development deployment
 
 For the normal development path, the repository now provides a single
-orchestrator that runs the local tests and CloudFormation validation, deploys
+orchestrator that runs the repository tests and CloudFormation validation, deploys
 Stack 00, packages and uploads the Lambda/web artifacts, builds and pushes the
 ARM64 Runtime image, ingests the deterministic fixtures, and deploys Stacks
 01–07 in dependency order:
@@ -916,6 +917,31 @@ Deploy Stacks 05 and 06. Start a one-incident workflow and verify:
 - the workflow can resume from a checkpoint;
 - traces and metrics contain the workflow/session ID;
 - failures generate useful stack and application events.
+
+To run the deterministic recovery test, deploy Stack 04 with
+`FailureInjectionEnabled=ENABLED`:
+
+```bash
+python3 cloudformation/deploy.py --environment dev --stack 04-agentcore --execute \
+  --set FailureInjectionEnabled=ENABLED
+```
+
+Then start the Stack 05 state machine with a payload like this:
+
+```json
+{
+  "workflow_id": "recovery-demo-1",
+  "customer_id": "ACME-482",
+  "tenant_id": "tenant_acme",
+  "request": "Investigate the duplicate invoice.",
+  "failure_after_step": "log_lookup"
+}
+```
+
+The Runtime fails once after durably writing `log_lookup`. Step Functions
+retries the same workflow, the Runtime hydrates the checkpoint, skips the
+completed stages, and finishes the investigation. The injection is opt-in and
+one-shot per workflow; disable `FailureInjectionEnabled` after the test.
 
 ### Step 8 — Deploy the web console
 

@@ -167,7 +167,11 @@ def ingest(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default=".ledgerflow/ledgerflow.db")
+    parser.add_argument(
+        "--fixture-db",
+        default=":memory:",
+        help="optional SQLite path for inspecting generated fixtures (default: in-memory)",
+    )
     parser.add_argument("--context-file", type=Path, default=Path("cloudformation/build/deployment-context-dev.json"))
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--vector-dimension", type=int, default=1024)
@@ -178,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         json.dumps(
             ingest(
-                db_path=args.db,
+                db_path=args.fixture_db,
                 context=context,
                 region=args.region,
                 vector_dimension=args.vector_dimension,

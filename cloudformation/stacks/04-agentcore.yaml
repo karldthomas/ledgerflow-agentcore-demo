@@ -21,6 +21,12 @@ Parameters:
     AllowedValues:
       - ENABLED
       - DISABLED
+  FailureInjectionEnabled:
+    Type: String
+    Default: DISABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
   RuntimeExecutionRoleArn:
     Type: String
   GatewayExecutionRoleArn:
@@ -426,6 +432,7 @@ Resources:
         SYNTHESIS_PROMPT_DEFAULT_ARN: !Ref SynthesisPromptVersion
         MODEL_ID: !Ref ReasoningModelId
         MODEL_REASONING_ENABLED: !Ref EnableModelReasoning
+        LEDGERFLOW_ENABLE_FAILURE_INJECTION: !Ref FailureInjectionEnabled
       Tags:
         Environment: !Ref EnvironmentName
         Purpose: incident-response

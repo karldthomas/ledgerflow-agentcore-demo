@@ -2,12 +2,21 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    LEDGERFLOW_BACKEND=aws \
     PORT=8080
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY ledgerflow ./ledgerflow
+COPY ledgerflow/__init__.py \
+     ledgerflow/cloud_agent.py \
+     ledgerflow/evidence_reasoning.py \
+     ledgerflow/gateway.py \
+     ledgerflow/models.py \
+     ledgerflow/planner.py \
+     ledgerflow/prompting.py \
+     ledgerflow/reasoning.py \
+     ledgerflow/runtime_entry.py \
+     ledgerflow/runtime_server.py \
+     ./ledgerflow/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

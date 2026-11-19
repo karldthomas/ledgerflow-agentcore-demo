@@ -1,8 +1,8 @@
 """AWS-backed investigation handler used by the Runtime container.
 
-This adapter keeps the local deterministic workflow's report contract while
-moving business-data access behind AgentCore Gateway, checkpoints into
-DynamoDB, and long-term memory into AgentCore Memory.
+The handler keeps the shared report contract while moving business-data access
+behind AgentCore Gateway, checkpoints into DynamoDB, and long-term memory into
+AgentCore Memory.
 """
 
 from __future__ import annotations
@@ -21,6 +21,18 @@ from .planner import BedrockInvestigationPlanner, InvestigationPlan
 from .reasoning import BedrockReportReasoner, ModelReasoningError
 
 
+WORKFLOW_STATE_SCHEMA_VERSION = "ledgerflow.workflow.v1"
+WORKFLOW_LEASE_SECONDS = 60
+
+
+class WorkflowInProgressError(RuntimeError):
+    """Raised when another worker currently owns a workflow lease."""
+
+
+class DeterministicFailure(RuntimeError):
+    """Raised by the opt-in one-shot failure injector after a durable checkpoint."""
+
+
 class CloudInvestigationHandler:
     def __init__(self, *, region: str | None = None) -> None:
         self.region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
@@ -34,7 +46,15 @@ class CloudInvestigationHandler:
             self.memory = boto3.client("bedrock-agentcore", region_name=self.region)
         except ImportError as exc:
             raise RuntimeError("boto3 is required for the AWS Runtime backend") from exc
+        self.worker_id = f"{os.environ.get('HOSTNAME', 'ledgerflow-runtime')}:{os.getpid()}:{uuid4().hex}"
+        try:
+            self.lease_seconds = max(5, int(os.environ.get("WORKFLOW_LEASE_SECONDS", str(WORKFLOW_LEASE_SECONDS))))
+        except ValueError:
+            self.lease_seconds = WORKFLOW_LEASE_SECONDS
         self.current_workflow_id: str | None = None
+        self.current_tenant_id: str | None = None
+        self.failure_injection_consumed = False
+        self.resumed = False
         self.reasoner: BedrockReportReasoner | None = None
         self.planner: BedrockInvestigationPlanner | None = None
         if os.environ.get("MODEL_REASONING_ENABLED", "DISABLED").upper() == "ENABLED":
@@ -127,22 +147,212 @@ class CloudInvestigationHandler:
             visibility="operator",
         )
 
-    def _checkpoint(self, workflow_id: str, customer_id: str, step: str, data: dict[str, Any]) -> None:
+    @staticmethod
+    def _is_conditional_failure(exc: Exception) -> bool:
+        response = getattr(exc, "response", {})
+        if isinstance(response, dict):
+            error = response.get("Error", {})
+            if isinstance(error, dict) and error.get("Code") == "ConditionalCheckFailedException":
+                return True
+        return "ConditionalCheckFailedException" in str(exc)
+
+    def _load_checkpoint(self, workflow_id: str) -> dict[str, Any] | None:
+        table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
+        if not table_name:
+            return None
+        item = self.dynamodb.Table(table_name).get_item(
+            Key={"WorkflowId": workflow_id},
+            ConsistentRead=True,
+        ).get("Item")
+        if not item:
+            return None
+        raw_data = item.get("Data", "{}")
+        try:
+            state = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+        except (TypeError, json.JSONDecodeError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        schema_version = str(item.get("StateSchemaVersion", ""))
+        return {
+            "item": item,
+            "state": state if schema_version == WORKFLOW_STATE_SCHEMA_VERSION else {},
+            "schema_version": schema_version,
+            "completed_steps": {
+                str(step) for step in item.get("CompletedSteps", []) if isinstance(step, str)
+            }
+            if schema_version == WORKFLOW_STATE_SCHEMA_VERSION
+            else set(),
+            "status": str(item.get("Status", "")),
+            "failure_injection_consumed": bool(item.get("FailureInjectionConsumed", False)),
+        }
+
+    def _acquire_workflow_lease(self, workflow_id: str, customer_id: str, tenant_id: str) -> None:
         table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
         if not table_name:
             return
-        table = self.dynamodb.Table(table_name)
-        table.update_item(
-            Key={"WorkflowId": workflow_id},
-            UpdateExpression="SET CustomerId = :customer, TenantId = :tenant, CurrentStep = :step, #data = :data, UpdatedAt = :updated",
-            ExpressionAttributeNames={"#data": "Data"},
-            ExpressionAttributeValues={
-                ":customer": customer_id,
-                ":tenant": self.current_tenant_id if hasattr(self, "current_tenant_id") else "tenant_acme",
-                ":step": step,
-                ":data": json.dumps(data, sort_keys=True),
-                ":updated": datetime.now(timezone.utc).isoformat(),
-            },
+        now = int(time.time())
+        owner = getattr(self, "worker_id", "ledgerflow-runtime")
+        try:
+            self.dynamodb.Table(table_name).update_item(
+                Key={"WorkflowId": workflow_id},
+                UpdateExpression=(
+                    "SET CustomerId = :customer, TenantId = :tenant, "
+                    "StateSchemaVersion = :schema, #status = :status, "
+                    "LeaseOwner = :owner, LeaseExpiresAt = :expires"
+                ),
+                ExpressionAttributeNames={"#status": "Status"},
+                ExpressionAttributeValues={
+                    ":customer": customer_id,
+                    ":tenant": tenant_id,
+                    ":schema": WORKFLOW_STATE_SCHEMA_VERSION,
+                    ":status": "RUNNING",
+                    ":owner": owner,
+                    ":expires": now + int(getattr(self, "lease_seconds", WORKFLOW_LEASE_SECONDS)),
+                    ":now": now,
+                },
+                ConditionExpression=(
+                    "attribute_not_exists(LeaseOwner) OR "
+                    "attribute_not_exists(LeaseExpiresAt) OR "
+                    "LeaseExpiresAt < :now OR LeaseOwner = :owner"
+                ),
+            )
+        except Exception as exc:
+            if self._is_conditional_failure(exc):
+                raise WorkflowInProgressError(f"workflow {workflow_id} is leased by another worker") from exc
+            raise
+
+    def _release_workflow_lease(self, workflow_id: str) -> None:
+        table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
+        if not table_name:
+            return
+        try:
+            self.dynamodb.Table(table_name).update_item(
+                Key={"WorkflowId": workflow_id},
+                UpdateExpression="REMOVE LeaseOwner, LeaseExpiresAt",
+                ExpressionAttributeValues={":owner": getattr(self, "worker_id", "ledgerflow-runtime")},
+                ConditionExpression="LeaseOwner = :owner",
+            )
+        except Exception as exc:
+            if not self._is_conditional_failure(exc):
+                print(json.dumps({"event": "workflow_lease_release_degraded", "error": str(exc)}))
+
+    def _checkpoint(
+        self,
+        workflow_id: str,
+        customer_id: str,
+        step: str,
+        data: dict[str, Any],
+        completed_steps: set[str],
+        *,
+        failure_after_step: str | None = None,
+        status: str = "RUNNING",
+    ) -> None:
+        table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
+        inject_failure = bool(
+            failure_after_step
+            and failure_after_step == step
+            and not getattr(self, "failure_injection_consumed", False)
+        )
+        if inject_failure:
+            self.failure_injection_consumed = True
+        if table_name:
+            now = datetime.now(timezone.utc).isoformat()
+            lease_expires = int(time.time()) + int(getattr(self, "lease_seconds", WORKFLOW_LEASE_SECONDS))
+            self.dynamodb.Table(table_name).update_item(
+                Key={"WorkflowId": workflow_id},
+                UpdateExpression=(
+                    "SET CustomerId = :customer, TenantId = :tenant, CurrentStep = :step, "
+                    "#data = :data, CompletedSteps = :completed, StateSchemaVersion = :schema, "
+                    "#status = :status, CheckpointVersion = if_not_exists(#version, :zero) + :one, "
+                    "FailureInjectionConsumed = :failure_consumed, UpdatedAt = :updated, "
+                    "LeaseOwner = :owner, LeaseExpiresAt = :lease_expires"
+                ),
+                ExpressionAttributeNames={"#data": "Data", "#status": "Status", "#version": "CheckpointVersion"},
+                ExpressionAttributeValues={
+                    ":customer": customer_id,
+                    ":tenant": self.current_tenant_id or "tenant_acme",
+                    ":step": step,
+                    ":data": json.dumps(data, sort_keys=True, default=str),
+                    ":completed": sorted(completed_steps),
+                    ":schema": WORKFLOW_STATE_SCHEMA_VERSION,
+                    ":status": status,
+                    ":zero": 0,
+                    ":one": 1,
+                    ":failure_consumed": bool(getattr(self, "failure_injection_consumed", False)),
+                    ":updated": now,
+                    ":owner": getattr(self, "worker_id", "ledgerflow-runtime"),
+                    ":lease_expires": lease_expires,
+                    ":lease_now": int(time.time()),
+                },
+                ConditionExpression="LeaseOwner = :owner AND LeaseExpiresAt >= :lease_now",
+            )
+            self._emit(
+                "checkpoint",
+                step,
+                "completed",
+                {
+                    "completed_steps": sorted(completed_steps),
+                    "resumed": bool(getattr(self, "resumed", False)),
+                    "failure_injection_consumed": bool(getattr(self, "failure_injection_consumed", False)),
+                },
+            )
+        if inject_failure:
+            self._emit(
+                "failure_injection",
+                step,
+                "failed",
+                {"failure_after_step": step, "checkpoint_durable": bool(table_name)},
+            )
+            # This is a controlled crash simulation. Releasing the lease makes
+            # the next Step Functions retry deterministic; an actual process
+            # crash leaves the lease to expire normally.
+            self._release_workflow_lease(workflow_id)
+            raise DeterministicFailure(f"deterministic failure injected after checkpoint {step}")
+
+    @staticmethod
+    def _failure_after_step(payload: dict[str, Any]) -> str | None:
+        value = str(payload.get("failure_after_step") or "").strip()
+        if not value:
+            return None
+        if os.environ.get("LEDGERFLOW_ENABLE_FAILURE_INJECTION", "DISABLED").upper() != "ENABLED":
+            raise ValueError("failure injection is disabled")
+        valid_steps = {
+            "started",
+            "planning",
+            "incident_lookup",
+            "invoice_lookup",
+            "log_lookup",
+            "deployment_lookup",
+            "retrieval",
+            "memory_lookup",
+            "report_synthesis",
+            "completed",
+        }
+        if value not in valid_steps:
+            raise ValueError(f"failure_after_step must be one of: {', '.join(sorted(valid_steps))}")
+        if not os.environ.get("WORKFLOW_CHECKPOINTS_TABLE"):
+            raise ValueError("failure injection requires WORKFLOW_CHECKPOINTS_TABLE")
+        return value
+
+    def _save_stage(
+        self,
+        *,
+        workflow_id: str,
+        customer_id: str,
+        step: str,
+        state: dict[str, Any],
+        completed_steps: set[str],
+        failure_after_step: str | None,
+    ) -> None:
+        completed_steps.add(step)
+        self._checkpoint(
+            workflow_id,
+            customer_id,
+            step,
+            state,
+            completed_steps,
+            failure_after_step=failure_after_step,
         )
 
     @staticmethod
@@ -375,74 +585,266 @@ class CloudInvestigationHandler:
         customer_id = str(payload["customer_id"])
         tenant_id = str(payload.get("tenant_id", "tenant_acme"))
         workflow_id = str(payload.get("workflow_id") or f"runtime-{customer_id}")
+        failure_after_step = self._failure_after_step(payload)
         self.current_workflow_id = workflow_id
         self.current_tenant_id = tenant_id
-        self._emit("workflow", "investigation", "started", {"customer_id": customer_id, "tenant_id": tenant_id, "request": payload.get("request", "")})
-        self._checkpoint(workflow_id, customer_id, "started", {})
+        checkpoint = self._load_checkpoint(workflow_id)
+        if checkpoint:
+            item = checkpoint["item"]
+            stored_customer = str(item.get("CustomerId", ""))
+            stored_tenant = str(item.get("TenantId", ""))
+            if stored_customer and stored_customer != customer_id:
+                raise ValueError(f"workflow {workflow_id} belongs to another customer")
+            if stored_tenant and stored_tenant != tenant_id:
+                raise ValueError(f"workflow {workflow_id} belongs to another tenant")
+            if checkpoint["status"] == "COMPLETED" and checkpoint["state"].get("report"):
+                report = IncidentReport(**checkpoint["state"]["report"])
+                self._emit("workflow", "investigation", "reused", {"reason": "completed_checkpoint"})
+                return report.to_dict()
 
-        plan = self._plan(payload)
-        incidents = self._call("Incidents", "search_incidents", tenant_id, query=plan.incident_query)
-        if not incidents:
-            incidents = self._call("Incidents", "search_incidents", tenant_id, query=customer_id)
-        if not incidents:
-            raise ValueError(f"no incident found for {customer_id}")
-        incident = incidents[0]
-        self._checkpoint(workflow_id, customer_id, "incident_lookup", {"incident_id": incident.get("IncidentId")})
+        self.failure_injection_consumed = bool(checkpoint and checkpoint["failure_injection_consumed"])
+        self.resumed = bool(checkpoint and checkpoint["completed_steps"])
+        self._acquire_workflow_lease(workflow_id, customer_id, tenant_id)
 
-        invoices = self._call("Invoices", "get_customer_invoices", tenant_id, customer_id=customer_id) if plan.include_invoices else []
-        self._checkpoint(workflow_id, customer_id, "invoice_lookup", {"count": len(invoices)})
-        logs = self._call("ApplicationLogs", "get_application_logs", tenant_id, customer_id=customer_id, limit=100) if plan.include_logs else []
-        self._checkpoint(workflow_id, customer_id, "log_lookup", {"count": len(logs)})
-        deployment_version = plan.deployment_version or incident.get("DeploymentVersion", "3.8.2")
-        deployments = self._call("Deployments", "get_deployments", tenant_id, version=deployment_version) if plan.include_deployments else []
-        self._checkpoint(workflow_id, customer_id, "deployment_lookup", {"count": len(deployments)})
-        vector_items = self._call(
-            "Evidence",
-            "search_evidence",
-            tenant_id,
-            query=plan.evidence_query,
-            top_k=6,
-        )
-        self._checkpoint(workflow_id, customer_id, "retrieval", {"count": len(vector_items)})
-        memories = self._memory_records(tenant_id, "payment-retry-handler", "payment retry idempotency policy")
-        self._emit(
-            "memory",
-            "memory_lookup",
-            "completed",
-            {
-                "result_count": len(memories),
-                "result_preview": self._result_preview("memory_lookup", memories),
-                "preview_truncated": len(memories) > 4,
-            },
-        )
-        self._checkpoint(workflow_id, customer_id, "memory_lookup", {"count": len(memories)})
-
-        report = self._build_report(incident, invoices, logs, deployments, vector_items, memories, tenant_id)
-        if self.reasoner is not None:
-            packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
-            try:
-                report = self.reasoner.synthesize(report, evidence=packet, memories=memories)
-            except ModelReasoningError as exc:
-                print(json.dumps({"event": "model_reasoning_degraded", "error": str(exc)}))
-                self._emit(
-                    "reasoning_synthesis",
-                    "report_synthesis",
-                    "degraded",
-                    {"reason": "model_synthesis_unavailable", "fallback_used": True, "prompt_redacted": True},
-                )
-        report = self._publish_idempotently(workflow_id, report)
-        self._checkpoint(workflow_id, customer_id, "completed", {"report": report.to_dict()})
-        self._record_memory_event(workflow_id, tenant_id, report)
-        reports_bucket = os.environ.get("REPORTS_BUCKET")
-        if reports_bucket:
-            self.s3.put_object(
-                Bucket=reports_bucket,
-                Key=f"investigations/{workflow_id}.json",
-                Body=json.dumps(report.to_dict(), sort_keys=True).encode("utf-8"),
-                ContentType="application/json",
+        state = dict(checkpoint["state"]) if checkpoint else {}
+        completed_steps = set(checkpoint["completed_steps"]) if checkpoint else set()
+        if "started" not in completed_steps:
+            state = {}
+            completed_steps = set()
+            self._emit(
+                "workflow",
+                "investigation",
+                "started",
+                {"customer_id": customer_id, "tenant_id": tenant_id, "request": payload.get("request", "")},
             )
-        self._emit("workflow", "investigation", "completed", {"report": report.to_dict()})
-        return report.to_dict()
+            self._save_stage(
+                workflow_id=workflow_id,
+                customer_id=customer_id,
+                step="started",
+                state=state,
+                completed_steps=completed_steps,
+                failure_after_step=failure_after_step,
+            )
+        else:
+            self._emit(
+                "workflow",
+                "investigation",
+                "resumed",
+                {
+                    "from_step": checkpoint["item"].get("CurrentStep") if checkpoint else "started",
+                    "completed_steps": sorted(completed_steps),
+                },
+            )
+
+        try:
+            if "planning" in completed_steps and isinstance(state.get("plan"), dict):
+                plan = InvestigationPlan.from_dict(state["plan"])
+            else:
+                plan = self._plan(payload)
+                state["plan"] = plan.to_dict()
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="planning",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "incident_lookup" in completed_steps and isinstance(state.get("incident"), dict):
+                incident = state["incident"]
+            else:
+                incidents = self._call("Incidents", "search_incidents", tenant_id, query=plan.incident_query)
+                if not incidents:
+                    incidents = self._call("Incidents", "search_incidents", tenant_id, query=customer_id)
+                if not incidents:
+                    raise ValueError(f"no incident found for {customer_id}")
+                incident = incidents[0]
+                state["incident"] = incident
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="incident_lookup",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "invoice_lookup" in completed_steps and isinstance(state.get("invoices"), list):
+                invoices = state["invoices"]
+            else:
+                invoices = self._call("Invoices", "get_customer_invoices", tenant_id, customer_id=customer_id) if plan.include_invoices else []
+                state["invoices"] = invoices
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="invoice_lookup",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "log_lookup" in completed_steps and isinstance(state.get("logs"), list):
+                logs = state["logs"]
+            else:
+                logs = self._call("ApplicationLogs", "get_application_logs", tenant_id, customer_id=customer_id, limit=100) if plan.include_logs else []
+                state["logs"] = logs
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="log_lookup",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            deployment_version = plan.deployment_version or incident.get("DeploymentVersion", "3.8.2")
+            if "deployment_lookup" in completed_steps and isinstance(state.get("deployments"), list):
+                deployments = state["deployments"]
+            else:
+                deployments = self._call("Deployments", "get_deployments", tenant_id, version=deployment_version) if plan.include_deployments else []
+                state["deployments"] = deployments
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="deployment_lookup",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "retrieval" in completed_steps and isinstance(state.get("vector_items"), list):
+                vector_items = state["vector_items"]
+            else:
+                vector_items = self._call(
+                    "Evidence",
+                    "search_evidence",
+                    tenant_id,
+                    query=plan.evidence_query,
+                    top_k=6,
+                )
+                state["vector_items"] = vector_items
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="retrieval",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "memory_lookup" in completed_steps and isinstance(state.get("memories"), list):
+                memories = state["memories"]
+            else:
+                memories = self._memory_records(tenant_id, "payment-retry-handler", "payment retry idempotency policy")
+                self._emit(
+                    "memory",
+                    "memory_lookup",
+                    "completed",
+                    {
+                        "result_count": len(memories),
+                        "result_preview": self._result_preview("memory_lookup", memories),
+                        "preview_truncated": len(memories) > 4,
+                    },
+                )
+                state["memories"] = memories
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="memory_lookup",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            if "report_synthesis" in completed_steps and isinstance(state.get("report"), dict):
+                report = IncidentReport(**state["report"])
+            else:
+                report = self._build_report(incident, invoices, logs, deployments, vector_items, memories, tenant_id)
+                if self.reasoner is not None:
+                    packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
+                    try:
+                        report = self.reasoner.synthesize(report, evidence=packet, memories=memories)
+                    except ModelReasoningError as exc:
+                        print(json.dumps({"event": "model_reasoning_degraded", "error": str(exc)}))
+                        self._emit(
+                            "reasoning_synthesis",
+                            "report_synthesis",
+                            "degraded",
+                            {"reason": "model_synthesis_unavailable", "fallback_used": True, "prompt_redacted": True},
+                        )
+                state["report"] = report.to_dict()
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="report_synthesis",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            report = self._publish_idempotently(workflow_id, report)
+            state["report"] = report.to_dict()
+            state["report_published"] = True
+            self._checkpoint(
+                workflow_id,
+                customer_id,
+                "report_synthesis",
+                state,
+                completed_steps,
+                failure_after_step=failure_after_step,
+            )
+
+            if not state.get("memory_recorded"):
+                self._record_memory_event(workflow_id, tenant_id, report)
+                state["memory_recorded"] = True
+                self._checkpoint(
+                    workflow_id,
+                    customer_id,
+                    "report_synthesis",
+                    state,
+                    completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+
+            reports_bucket = os.environ.get("REPORTS_BUCKET")
+            if reports_bucket and not state.get("report_stored"):
+                self.s3.put_object(
+                    Bucket=reports_bucket,
+                    Key=f"investigations/{workflow_id}.json",
+                    Body=json.dumps(report.to_dict(), sort_keys=True).encode("utf-8"),
+                    ContentType="application/json",
+                )
+                state["report_stored"] = True
+                self._checkpoint(
+                    workflow_id,
+                    customer_id,
+                    "report_synthesis",
+                    state,
+                    completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+            elif not reports_bucket:
+                state["report_stored"] = True
+
+            completed_steps.add("completed")
+            self._checkpoint(
+                workflow_id,
+                customer_id,
+                "completed",
+                state,
+                completed_steps,
+                failure_after_step=failure_after_step,
+                status="COMPLETED",
+            )
+            self._release_workflow_lease(workflow_id)
+            self._emit("workflow", "investigation", "completed", {"report": report.to_dict()})
+            return report.to_dict()
+        except DeterministicFailure:
+            raise
+        except Exception:
+            self._release_workflow_lease(workflow_id)
+            raise
 
     @staticmethod
     def _evidence_packet(

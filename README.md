@@ -1,25 +1,23 @@
 # LedgerFlow Incident Response Agent
 
-This repository is the first runnable vertical slice of the capstone in
-`CASE_STUDY.md`. It is deliberately dependency-light: the default runtime uses
-Python 3.12, SQLite, and deterministic local retrieval, so the safety and
-reliability behaviors can be tested without credentials or network services.
+This repository is a deployable vertical slice of the capstone in
+`CASE_STUDY.md`. The AWS path provisions the AgentCore Runtime, Gateway, Memory,
+and supporting services through eight independent CloudFormation stacks and
+can be launched with `deploy-all.sh`.
 
 The POC investigates the synthetic `ACME-482` duplicate-invoice incident as its
 canonical walkthrough and includes additional tenant-scoped scenarios for
 timeouts, payment failures, configuration errors, and duplicate invoices. It
 demonstrates:
 
-- read-only investigation tools;
-- keyword + deterministic vector retrieval, reciprocal-rank fusion, and reranking;
+- read-only AgentCore Gateway tools with tenant authorization;
+- S3 Vectors enhanced hybrid retrieval with Titan embeddings and reciprocal-rank fusion;
 - schema-driven evidence normalization with typed facts, relationships, and hypotheses;
 - evidence claims that are traceable to authorized source IDs;
-- tenant-aware authorization filtering;
-- task-aware retrieval policies;
-- memory deduplication, supersession, provenance, and expiration;
-- invariant-preserving context compaction and token budgeting;
-- stable-prefix cache accounting; and
-- durable checkpoints with resumable workflow state.
+- AgentCore Memory with tenant namespaces and expiration;
+- versioned DynamoDB checkpoints, workflow leases, and idempotent report publication;
+- Step Functions durable workflow execution; and
+- operator-visible reasoning summaries, execution logs, and typed reports.
 
 The AWS Runtime stores its planner and report-synthesis instructions in
 Amazon Bedrock Prompt Management. Each investigation resolves an immutable
@@ -29,96 +27,63 @@ runtime version from the console's Prompt library tab. Operators can inspect
 safe reasoning summaries and execution results, but cannot read or change
 prompt bodies.
 
-The deterministic seed contains 21 evidence documents, 112 incidents, 212
-customers, 215 invoices, 5,030 application logs, and 42 deployments. The
-`tenant_acme` slice includes the original `ACME-482` and `ACME-483` records plus
-12 additional cases, `ACME-484` through `ACME-495`.
+The deterministic deployment fixture corpus contains 21 evidence documents, 112
+incidents, 212 customers, 215 invoices, 5,030 application logs, and 42
+deployments. The `tenant_acme` slice includes the original `ACME-482` and
+`ACME-483` records plus 12 additional cases, `ACME-484` through `ACME-495`.
 
-The local agent remains deterministic for regression testing. The deployed AWS
-Runtime uses a bounded Bedrock Converse planner and report synthesizer with
-`amazon.nova-micro-v1:0`; the model can refine queries and choose which
-read-only evidence categories to collect, while Gateway, tenant authorization,
-checkpoints, and evidence validation remain application-owned. The model cannot
-execute financial writes or cite IDs outside the authorized evidence packet. The
-AWS path in this repository uses AgentCore Runtime/Gateway/Memory, DynamoDB,
-S3, S3 Vectors, Lambda, Step Functions, Cognito, API Gateway, and CloudWatch
-through independent CloudFormation stacks.
+The deployed AWS Runtime uses a bounded Bedrock Converse planner and report
+synthesizer with `amazon.nova-micro-v1:0`; the model can refine queries and
+choose which read-only evidence categories to collect, while Gateway, tenant
+authorization, checkpoints, and evidence validation remain application-owned.
+The model cannot execute financial writes or cite IDs outside the authorized
+evidence packet. The AWS path in this repository uses AgentCore
+Runtime/Gateway/Memory, DynamoDB, S3, S3 Vectors, Lambda, Step Functions,
+Cognito, API Gateway, and CloudWatch through independent CloudFormation stacks.
 
-## Quick start
+## Deployment prerequisites
 
-Install the local development extras:
+The repository is deployed from a host with:
 
-```bash
-python3 -m pip install -e '.[dev]'
-```
+- Python 3.12 or newer;
+- the AWS CLI;
+- Docker with Buildx and Linux/arm64 build support; and
+- local `boto3` for the deployment scripts.
 
-The local agent is deterministic and does not require AWS credentials. Run it
-from the repository root:
+The deployment scripts use ambient AWS environment variables. The repository
+does not select an AWS profile. Local commands are limited to deployment
+planning, contract validation, packaging, and tests; the investigation itself
+runs in AgentCore Runtime.
 
-```bash
-python3 -m ledgerflow.cli seed --reset
-python3 -m ledgerflow.cli investigate ACME-482
-python3 -m ledgerflow.cli investigate ACME-487
-python3 -m pytest
-```
+The deployment fixture corpus includes these representative scenarios:
 
-The default database is `.ledgerflow/ledgerflow.db`. To keep the workspace
-clean, use a temporary path instead:
-
-```bash
-python3 -m ledgerflow.cli demo --db /tmp/ledgerflow-demo.db
-```
-
-To demonstrate recovery from an interrupted investigation:
-
-```bash
-python3 -m ledgerflow.cli investigate ACME-482 \
-  --db /tmp/ledgerflow-recovery.db \
-  --workflow-id demo-recovery \
-  --reset \
-  --fail-after-step log_lookup
-
-python3 -m ledgerflow.cli investigate ACME-482 \
-  --db /tmp/ledgerflow-recovery.db \
-  --workflow-id demo-recovery
-```
-
-The first command intentionally exits with a simulated crash after the log
-lookup checkpoint. The second hydrates the checkpoint and completes the report.
-
-Useful expanded scenarios include:
-
-| Customer | Incident | Scenario |
-|---|---|---|
-| `ACME-484` | `INC-1047` | unresolved payment timeout |
-| `ACME-485` | `INC-1048` | merchant configuration error |
-| `ACME-487` | `INC-1050` | duplicate invoice after a changed retry key |
+| Customer   | Incident   | Scenario                                              |
+| ---------- | ---------- | ----------------------------------------------------- |
+| `ACME-484` | `INC-1047` | unresolved payment timeout                            |
+| `ACME-485` | `INC-1048` | merchant configuration error                          |
+| `ACME-487` | `INC-1050` | duplicate invoice after a changed retry key           |
 | `ACME-488` | `INC-1051` | timeout reconciled with a successful provider outcome |
-| `ACME-490` | `INC-1053` | provider payment failure |
-| `ACME-495` | `INC-1058` | timeout followed by a safe retry |
+| `ACME-490` | `INC-1053` | provider payment failure                              |
+| `ACME-495` | `INC-1058` | timeout followed by a safe retry                      |
 
-The remaining expanded cases are in `ledgerflow/db.py` and follow the same
-schema-driven evidence path.
+The remaining cases are generated by `ledgerflow/db.py` for
+`cloudformation/ingest.py`; the fixture store is an implementation detail of
+deployment, not an application runtime.
 
 ## Layout
 
 ```text
 ledgerflow/
-  agent.py          end-to-end investigation orchestrator
-  cli.py            local command-line entry point
-  context.py        invariants, compaction, token budgets, cache accounting
-  db.py             SQLite schema and deterministic synthetic dataset
-  memory.py         memory lifecycle service
-  models.py         typed domain objects and report schemas
+  cloud_agent.py       AWS Runtime handler using Gateway, Memory, DynamoDB, and S3
+  db.py                deployment-only deterministic fixture generator
   evidence_reasoning.py  source normalization and typed evidence claims
-  policies.py       task classifier and retrieval policy router
-  retrieval.py      keyword/vector/RRF/reranking pipeline
-  prompting.py      active native Bedrock prompt-version resolver
-  state.py          checkpoints, leases, and operation idempotency
-  tools.py          read-only data and authorization tools
-  cloud_agent.py    AWS Runtime handler using Gateway, Memory, DynamoDB, and S3
-  gateway.py        SigV4 MCP client for AgentCore Gateway
-  reasoning.py      optional Bedrock Converse synthesis with citation checks
+  gateway.py            SigV4 MCP client for AgentCore Gateway
+  models.py             shared report contract
+  planner.py            bounded Bedrock investigation planner
+  prompting.py          active native Bedrock prompt-version resolver
+  reasoning.py          Bedrock report synthesis with citation checks
+  runtime_entry.py      AgentCore Runtime entrypoint
+  runtime_server.py     HTTP server for Runtime invocations
 cloudformation/
   stacks/            matching YAML templates and JSON parameter mappings
   scripts/           deployment configuration and stack-validation helpers
@@ -134,10 +99,10 @@ frontend/            Lambda-served control-room UI
 Dockerfile           AgentCore Runtime container boundary
 deploy-all.sh        one-command build, artifact, ingestion, and deployment entry point
 LICENSE              MIT license
-tests/              regression tests for the seven concepts
+tests/              AWS adapter and CloudFormation contract tests
 ```
 
-## AWS deployment path
+## Deployment path
 
 AWS operations are never implicit. Validate and preview without creating
 resources:
@@ -154,10 +119,10 @@ are no nested stacks, exports, imports, Service Catalog products, or
 cross-account dependencies.
 
 The deployed console URL is environment-specific. The deployment script prints
-the URL after Stack 07 completes; it requires Cognito authentication.
+the URL after Stack 07 completes; it is protected by Cognito authentication.
 
-For a complete development deployment, install `boto3` locally and provide
-ambient AWS credentials:
+For a complete AWS deployment, install `boto3` on the deployment host and
+provide ambient AWS credentials:
 
 ```bash
 python3 -m pip install --user boto3
@@ -170,7 +135,37 @@ export AWS_REGION=us-east-1
 `AWS_SESSION_TOKEN` is also supported for temporary credentials. The script
 does not select or require an AWS profile. It builds the Linux/arm64 Runtime
 image, packages the Lambda and web artifacts, loads the deterministic fixture
-corpus, deploys all eight stacks, and prints the authenticated console URL.
+corpus, deploys all eight stacks, and prints the Cognito-protected console URL.
+
+## Deterministic recovery test
+
+Failure injection is disabled by default. To exercise checkpoint recovery,
+deploy Stack 04 with `FailureInjectionEnabled=ENABLED`:
+
+```bash
+python3 cloudformation/deploy.py --environment dev --stack 04-agentcore --execute \
+  --set FailureInjectionEnabled=ENABLED
+```
+
+Then start a Step Functions execution with a stable `workflow_id` and
+`failure_after_step=log_lookup`:
+
+```json
+{
+  "workflow_id": "recovery-demo-1",
+  "customer_id": "ACME-482",
+  "tenant_id": "tenant_acme",
+  "request": "Investigate the duplicate invoice.",
+  "failure_after_step": "log_lookup"
+}
+```
+
+The first Runtime attempt writes the `log_lookup` checkpoint and fails
+deliberately. The Step Functions retry loads that checkpoint, skips the
+completed incident, invoice, and log stages, and continues with deployment
+lookup. The failure is one-shot per workflow because the checkpoint records
+that the injection was consumed. Set `FailureInjectionEnabled=DISABLED` again
+after the test.
 
 ## Architecture
 
@@ -236,10 +231,10 @@ The model is not authoritative for permissions, memory, workflow state, or
 evidence identity. The schema-driven evidence layer derives the report's typed
 claims from the collected records, and model synthesis may only preserve
 claims and citations that belong to the authorized evidence packet.
-Those concerns are owned by the authorization layer, memory service, context
-builder, evidence analyzer, and checkpoint store. The agent can recommend
-remediation, but the POC has no financial-write tool and explicitly rejects
-attempts to add one.
+Those concerns are owned by AgentCore Gateway policy, the tenant-scoped Lambda
+tools, AgentCore Memory, the DynamoDB checkpoint and operation ledgers, and the
+schema-driven evidence analyzer. The agent can recommend remediation, but the
+POC has no financial-write tool and explicitly rejects attempts to add one.
 
 ## Console and prompt management
 
@@ -271,8 +266,7 @@ BOOTSTRAP_ADMIN_EMAIL=admin@example.com ./deploy-all.sh --environment dev
 The script runs tests and contract validation, creates the ECR/artifact
 foundation, builds and pushes the digest-pinned Runtime image, packages the
 Lambda and web artifacts, ingests the fixture corpus, and deploys all eight
-independent stacks. Install the one local deployment dependency first if
-needed:
+independent stacks. Install the one deployment-host dependency first if needed:
 
 ```bash
 python3 -m pip install --user boto3
@@ -306,7 +300,7 @@ change sets must be inspected before execution.
 
 ## Verification
 
-The repository's local checks are:
+The repository's pre-deployment checks are:
 
 ```bash
 python3 -m pytest
@@ -315,8 +309,10 @@ bash -n deploy-all.sh
 node --check frontend/app.js
 ```
 
-The current fixture suite covers 21 regression tests, and the deployment
-validator checks all eight independent CloudFormation stack contracts.
+The regression suite covers AWS adapter behavior and all eight independent
+CloudFormation stack contracts. The fixture loader defaults to an in-memory
+SQLite source while uploading the deterministic corpus to AWS; it is not a
+supported application runtime.
 
 ## License
 

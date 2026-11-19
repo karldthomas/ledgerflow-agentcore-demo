@@ -23,6 +23,26 @@ class InvestigationPlan:
     include_deployments: bool
     rationale: str
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "InvestigationPlan":
+        """Rehydrate a validated plan from a durable workflow checkpoint."""
+
+        if not isinstance(value, dict):
+            raise ValueError("checkpoint plan must be an object")
+        deployment_version = value.get("deployment_version")
+        if deployment_version is not None:
+            deployment_version = str(deployment_version).strip() or None
+        return cls(
+            goal=str(value.get("goal") or "Investigate the reported customer incident."),
+            incident_query=str(value.get("incident_query") or ""),
+            evidence_query=str(value.get("evidence_query") or "incident evidence"),
+            deployment_version=deployment_version,
+            include_invoices=value.get("include_invoices") if isinstance(value.get("include_invoices"), bool) else True,
+            include_logs=value.get("include_logs") if isinstance(value.get("include_logs"), bool) else True,
+            include_deployments=value.get("include_deployments") if isinstance(value.get("include_deployments"), bool) else True,
+            rationale=str(value.get("rationale") or "Use the available read-only evidence sources."),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "goal": self.goal,

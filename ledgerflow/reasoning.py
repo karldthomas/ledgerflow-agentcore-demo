@@ -1,11 +1,10 @@
-"""Optional Bedrock report synthesis with a strict evidence boundary.
+"""Bedrock report synthesis with a strict evidence boundary.
 
-The reference workflow is deterministic so the POC can run without model
-access.  When ``MODEL_REASONING_ENABLED=ENABLED`` and ``MODEL_ID`` is set,
-this module lets the same workflow use Bedrock Converse to improve the report
-wording.  The model never chooses tools, tenants, permissions, or durable
-state; it only proposes fields for a report that has already been grounded by
-the read-only workflow.
+When ``MODEL_REASONING_ENABLED=ENABLED`` and ``MODEL_ID`` is set, this module
+uses Bedrock Converse to improve the wording of a report already grounded by
+the read-only workflow. The deterministic evidence report remains the safe
+fallback when model synthesis is unavailable. The model never chooses tools,
+tenants, permissions, or durable state.
 """
 
 from __future__ import annotations

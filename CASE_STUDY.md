@@ -7,7 +7,7 @@
 **Difficulty:** Intermediate to Advanced<br>
 **Estimated Duration:** 4–6 weeks<br>
 **Language:** Python 3.12+<br>
-**Environment:** Local development using Docker and synthetic data
+**Environment:** Deployable AWS infrastructure using managed services and synthetic data
 
 ### Business Scenario
 
@@ -142,20 +142,20 @@ The goal is to build this system incrementally, applying seven advanced context 
 | Capability           | Technology                                 |
 | -------------------- | ------------------------------------------ |
 | Programming language | Python 3.12+                               |
-| Agent runtime        | OpenAI Agents SDK or LangGraph             |
-| API framework        | FastAPI                                    |
-| Data validation      | Pydantic                                   |
-| Database             | PostgreSQL                                 |
-| Vector search        | pgvector                                   |
-| Keyword search       | PostgreSQL full-text search                |
-| Reranking            | Cross-encoder or dedicated reranking model |
-| Memory storage       | PostgreSQL                                 |
-| Durable workflows    | LangGraph checkpoints or Temporal          |
+| Agent runtime        | Amazon Bedrock AgentCore Runtime           |
+| API framework        | AgentCore Runtime and API Gateway          |
+| Data validation      | Typed Python report contracts              |
+| Database             | Amazon DynamoDB                            |
+| Vector search        | Amazon S3 Vectors                          |
+| Keyword search       | S3 Vectors enhanced text search            |
+| Reranking            | Application-owned evidence reranking       |
+| Memory storage       | Amazon Bedrock AgentCore Memory            |
+| Durable workflows    | AWS Step Functions and DynamoDB checkpoints |
 | Token counting       | Model-compatible tokenizer                 |
 | Context caching      | Model provider prompt caching              |
-| Observability        | OpenTelemetry                              |
+| Observability        | Amazon CloudWatch and AgentCore evaluation |
 | Testing              | pytest                                     |
-| Local infrastructure | Docker Compose                             |
+| Infrastructure       | AWS CloudFormation and Docker              |
 
 ---
 
@@ -291,7 +291,8 @@ get_customer_invoices(customer_id)
 get_application_logs(customer_id)
 ```
 
-These tools should retrieve synthetic data from the local database.
+These tools should retrieve synthetic data through the deployed, tenant-scoped
+read-only tool layer.
 
 ## Structured Output
 
@@ -408,8 +409,8 @@ The system must combine both retrieval methods.
 1. Create a document ingestion pipeline.
 2. Split runbooks into meaningful chunks.
 3. Generate embeddings.
-4. Store vectors in pgvector.
-5. Create a PostgreSQL full-text index.
+4. Store vectors in Amazon S3 Vectors.
+5. Configure enhanced S3 Vectors text search.
 6. Implement keyword search.
 7. Implement semantic search.
 8. Apply tenant and document metadata filters.
@@ -1061,7 +1062,7 @@ SAVE NEXT CHECKPOINT
 ## Implementation Tasks
 
 1. Create a workflow state schema.
-2. Persist checkpoints in PostgreSQL.
+2. Persist checkpoints in DynamoDB.
 3. Implement state hydration.
 4. Add workflow versioning.
 5. Implement optimistic concurrency control.
@@ -1107,6 +1108,26 @@ Attempt to hydrate an older checkpoint after changing the workflow state schema.
 
 Expected behavior:
 The state is migrated or rejected safely.
+
+### Deployed AWS deterministic recovery exercise
+
+The AWS implementation provides an opt-in one-shot failure injector for
+repeatable recovery testing. Enable `FailureInjectionEnabled` on the AgentCore
+stack and submit a workflow payload with:
+
+```json
+{
+  "workflow_id": "recovery-demo-1",
+  "customer_id": "ACME-482",
+  "tenant_id": "tenant_acme",
+  "failure_after_step": "log_lookup"
+}
+```
+
+The Runtime writes the `log_lookup` checkpoint and then fails deliberately.
+Step Functions retries the same workflow, hydrates the checkpoint, skips the
+completed stages, and continues with deployment lookup. The checkpoint marks
+the injection as consumed so the retry does not fail at the same stage again.
 
 ## Completion Criteria
 
@@ -1328,7 +1349,9 @@ ledgerflow-agent/
 |   |-- ingest_documents.py
 |   |-- run_benchmarks.py
 |
-|-- docker-compose.yml
+|-- cloudformation/
+|-- Dockerfile
+|-- deploy-all.sh
 |-- pyproject.toml
 |-- .env.example
 |-- README.md

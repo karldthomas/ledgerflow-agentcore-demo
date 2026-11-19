@@ -43,7 +43,7 @@ payment failures, configuration errors, and duplicate invoices.
 |---|---|
 | CloudFormation | CloudFormation deployment plan |
 | S3 Vectors | S3 Vectors retrieval design |
-| Runtime and reasoning | AgentCore Runtime, deterministic orchestration, and optional Bedrock synthesis |
+| Runtime and reasoning | AgentCore Runtime, bounded Bedrock planning, and report synthesis |
 | Gateway and Policy | AgentCore Gateway and Policy |
 | Memory | AgentCore Memory |
 | Checkpoints | Durable workflow design |
@@ -55,8 +55,9 @@ payment failures, configuration errors, and duplicate invoices.
 
 AgentCore Runtime is the secure hosting environment for the agent application.
 It provides sessions, isolation, scaling, endpoints, and runtime observability.
-The orchestration loop remains our code, so the application can implement the
-case study’s custom context builder, task router, and checkpoint protocol.
+The application owns the bounded investigation flow, evidence contract, and
+checkpoint protocol while AWS services provide the managed data and tool
+boundaries.
 
 This is different from AgentCore Harness. Harness supplies a managed agent loop;
 Runtime supplies the environment in which we run our own loop. The plan chooses
@@ -90,7 +91,7 @@ recommendations, and falls back to the deterministic report on an invalid or
 unavailable model response.
 
 `ledgerflow/evidence_reasoning.py` is the shared schema-driven evidence layer.
-It normalizes equivalent fields from SQLite `Evidence` objects and AWS records,
+It normalizes equivalent fields from AWS records,
 builds a retrieval query from incident/log fields, groups invoices by renewal
 or subscription, relates retry keys to timeout/failure observations, and
 selects the latest deployment at or before the incident. The report contract
@@ -102,12 +103,11 @@ fixture-specific IDs.
 The model does not own authorization, durable state, or financial actions. The
 LedgerFlow-specific code remains responsible for:
 
-- task classification;
-- retrieval policy selection;
+- bounded investigation planning;
+- read-only tool selection;
 - evidence validation;
 - schema-driven evidence analysis and typed claim construction;
-- context budgeting;
-- invariant preservation;
+- bounded model input construction;
 - report construction; and
 - model and tool trace events for the web console.
 
@@ -586,6 +586,14 @@ On restart:
 5. rebuild the context from durable evidence;
 6. resume from the last verified stage.
 
+The deployed Runtime implements this protocol with a versioned DynamoDB
+checkpoint and a conditional workflow lease. To verify it deterministically,
+enable the opt-in `FailureInjectionEnabled` stack parameter and invoke the
+workflow with `failure_after_step` set to `log_lookup`. The first attempt
+fails after the durable checkpoint; the Step Functions retry reuses the same
+`workflow_id`, loads the saved plan and records, and continues with the next
+stage. Disable the parameter after the exercise.
+
 For this POC, all investigation tools are read-only. The operation ledger and
 reconciliation tests still model the boundary required before any financial
 write is introduced.
@@ -662,9 +670,10 @@ The report also includes a machine-readable evidence contract:
 }
 ```
 
-To exercise a different branch locally, run `ACME-488` for a reconciled
-timeout or `ACME-485` for a configuration failure. The deployed tenant has the
-same cases under `INC-1047` through `INC-1058`.
+To exercise a different branch, submit an investigation for `ACME-488` for a
+reconciled timeout or `ACME-485` for a configuration failure through the
+deployed console or API. The deployed tenant has the same cases under
+`INC-1047` through `INC-1058`.
 
 ## Web console
 
@@ -705,21 +714,16 @@ ledgerflow-agent/
   DEPLOYMENT.md
   CASE_STUDY.md
   ledgerflow/
-    agent.py
     cloud_agent.py
-    context.py
     db.py
     evidence_reasoning.py
     gateway.py
-    memory.py
     models.py
-    policies.py
+    planner.py
+    prompting.py
     reasoning.py
-    retrieval.py
     runtime_entry.py
     runtime_server.py
-    state.py
-    tools.py
   cloudformation/
     stacks/                  matching YAML/JSON stack pairs
     deploy.py                plan/change-set/execute orchestrator
