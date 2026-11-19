@@ -20,6 +20,7 @@
     {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
     {"Key": "OperationLedgerTableName", "Value": "${CF_OUT_OperationLedgerTableName}"},
     {"Key": "PromptSelectionsTableName", "Value": "${CF_OUT_PromptSelectionsTableName}"},
+    {"Key": "DevToolsControlsTableName", "Value": "${CF_OUT_DevToolsControlsTableName}"},
     {"Key": "SearchIncidentsFunctionArn", "Value": "${CF_OUT_SearchIncidentsFunctionArn}"},
     {"Key": "GetCustomerInvoicesFunctionArn", "Value": "${CF_OUT_GetCustomerInvoicesFunctionArn}"},
     {"Key": "GetApplicationLogsFunctionArn", "Value": "${CF_OUT_GetApplicationLogsFunctionArn}"},

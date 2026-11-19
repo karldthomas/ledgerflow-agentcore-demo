@@ -325,6 +325,42 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  DevToolsControlsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ledgerflow-${EnvironmentName}-dev-tools-controls
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ControlId
+          AttributeType: S
+        - AttributeName: WorkflowId
+          AttributeType: S
+        - AttributeName: Step
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ControlId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: WorkflowStepIndex
+          KeySchema:
+            - AttributeName: WorkflowId
+              KeyType: HASH
+            - AttributeName: Step
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KmsKeyArn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAtEpoch
+        Enabled: true
+
 Outputs:
   CustomersTableName:
     Value: !Ref CustomersTable
@@ -350,3 +386,5 @@ Outputs:
     Value: !Ref OperationLedgerTable
   PromptSelectionsTableName:
     Value: !Ref PromptSelectionsTable
+  DevToolsControlsTableName:
+    Value: !Ref DevToolsControlsTable

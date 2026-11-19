@@ -10,6 +10,7 @@
     {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
     {"Key": "ReportsBucketName", "Value": "${CF_OUT_ReportsBucketName}"},
     {"Key": "PromptSelectionsTableName", "Value": "${CF_OUT_PromptSelectionsTableName}"},
+    {"Key": "DevToolsControlsTableName", "Value": "${CF_OUT_DevToolsControlsTableName}"},
     {"Key": "PlannerPromptArn", "Value": "${CF_OUT_PlannerPromptArn}"},
     {"Key": "SynthesisPromptArn", "Value": "${CF_OUT_SynthesisPromptArn}"},
     {"Key": "PlannerPromptDefaultVersionArn", "Value": "${CF_OUT_PlannerPromptVersionArn}"},

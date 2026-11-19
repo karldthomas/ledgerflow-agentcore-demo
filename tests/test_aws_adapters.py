@@ -97,6 +97,36 @@ class _DynamoResource:
         return self.checkpoint_table
 
 
+class _DevToolsTable:
+    def __init__(self, item):
+        self.item = item
+
+    def query(self, **_kwargs):
+        return {"Items": [dict(self.item)]}
+
+    def update_item(self, *, ExpressionAttributeValues, **_kwargs):
+        if self.item.get("Consumed") or not self.item.get("Enabled"):
+            raise _ConditionalFailure()
+        self.item.update(
+            {
+                "Consumed": ExpressionAttributeValues[":true"],
+                "ConsumedAt": ExpressionAttributeValues[":updated"],
+                "ConsumedBy": ExpressionAttributeValues[":worker"],
+                "UpdatedAt": ExpressionAttributeValues[":updated"],
+            }
+        )
+        return {}
+
+
+class _DynamoResourceWithDevTools(_DynamoResource):
+    def __init__(self, checkpoint_table, dev_tools_table):
+        super().__init__(checkpoint_table)
+        self.dev_tools_table = dev_tools_table
+
+    def Table(self, name):
+        return self.dev_tools_table if name == "dev-tools" else self.checkpoint_table
+
+
 class _InvestigationGateway:
     def __init__(self):
         self.calls: list[str] = []
@@ -419,6 +449,76 @@ def test_runtime_resumes_after_one_shot_checkpoint_failure(monkeypatch):
     # A completed workflow is hydrated from its checkpoint instead of
     # invoking any evidence tools again.
     assert resumed_handler.handle(payload) == report
+    assert gateway.calls == [
+        "search_incidents",
+        "get_customer_invoices",
+        "get_application_logs",
+        "get_deployments",
+        "search_evidence",
+    ]
+
+
+def test_runtime_claims_admin_dev_tools_failure_plan_once(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_CHECKPOINTS_TABLE", "checkpoints")
+    monkeypatch.setenv("DEV_TOOLS_CONTROLS_TABLE", "dev-tools")
+    monkeypatch.setenv("LEDGERFLOW_ENVIRONMENT", "dev")
+    monkeypatch.delenv("LEDGERFLOW_ENABLE_FAILURE_INJECTION", raising=False)
+    monkeypatch.delenv("WORKFLOW_EVENTS_TABLE", raising=False)
+    monkeypatch.delenv("OPERATION_LEDGER_TABLE", raising=False)
+    monkeypatch.delenv("REPORTS_BUCKET", raising=False)
+    monkeypatch.delenv("AGENTCORE_MEMORY_ID", raising=False)
+
+    checkpoint_table = _CheckpointTable()
+    dev_tools_table = _DevToolsTable(
+        {
+            "ControlId": "failure-control-1",
+            "Environment": "dev",
+            "WorkflowId": "dev-tools-recovery-1",
+            "Step": "log_lookup",
+            "Enabled": True,
+            "Consumed": False,
+            "CreatedAt": "2026-11-19T00:00:00Z",
+            "ExpiresAtEpoch": 4_102_444_800,
+        }
+    )
+    gateway = _InvestigationGateway()
+    handler = object.__new__(CloudInvestigationHandler)
+    handler.dynamodb = _DynamoResourceWithDevTools(checkpoint_table, dev_tools_table)
+    handler.gateway = gateway
+    handler.reasoner = None
+    handler.planner = None
+    handler.memory = None
+    handler.s3 = None
+    handler.worker_id = "test-worker"
+    handler.lease_seconds = 5
+
+    payload = {
+        "workflow_id": "dev-tools-recovery-1",
+        "customer_id": "ACME-482",
+        "tenant_id": "tenant_acme",
+        "request": "Investigate the duplicate invoice.",
+    }
+
+    with pytest.raises(DeterministicFailure, match="log_lookup"):
+        handler.handle(payload)
+
+    assert dev_tools_table.item["Consumed"] is True
+    assert checkpoint_table.item["CurrentStep"] == "log_lookup"
+
+    resumed_handler = object.__new__(CloudInvestigationHandler)
+    resumed_handler.dynamodb = _DynamoResourceWithDevTools(checkpoint_table, dev_tools_table)
+    resumed_handler.gateway = gateway
+    resumed_handler.reasoner = None
+    resumed_handler.planner = None
+    resumed_handler.memory = None
+    resumed_handler.s3 = None
+    resumed_handler.worker_id = "restarted-worker"
+    resumed_handler.lease_seconds = 5
+
+    report = resumed_handler.handle(payload)
+
+    assert report["incident_id"] == "INC-1042"
+    assert checkpoint_table.item["Status"] == "COMPLETED"
     assert gateway.calls == [
         "search_incidents",
         "get_customer_invoices",

@@ -1111,23 +1111,19 @@ The state is migrated or rejected safely.
 
 ### Deployed AWS deterministic recovery exercise
 
-The AWS implementation provides an opt-in one-shot failure injector for
-repeatable recovery testing. Enable `FailureInjectionEnabled` on the AgentCore
-stack and submit a workflow payload with:
+The AWS implementation provides an admin-only **Dev tools** tab for repeatable
+recovery testing. In a `dev` or `test` deployment, an administrator arms a
+failure plan for a workflow ID, selects a checkpoint such as `log_lookup`, and
+sets an expiry. The administrator then submits the investigation with the same
+workflow ID from the Investigation tab.
 
-```json
-{
-  "workflow_id": "recovery-demo-1",
-  "customer_id": "ACME-482",
-  "tenant_id": "tenant_acme",
-  "failure_after_step": "log_lookup"
-}
-```
-
-The Runtime writes the `log_lookup` checkpoint and then fails deliberately.
-Step Functions retries the same workflow, hydrates the checkpoint, skips the
-completed stages, and continues with deployment lookup. The checkpoint marks
-the injection as consumed so the retry does not fail at the same stage again.
+The Runtime writes the selected checkpoint and then fails deliberately. Step
+Functions retries the same workflow, hydrates the checkpoint, skips the
+completed stages, and continues with deployment lookup. A DynamoDB conditional
+claim marks the plan consumed, so the retry cannot fail at the same stage
+again. The administrator can disarm an active plan from the same tab. The
+control is unavailable in production and does not require a CloudFormation
+toggle for each exercise.
 
 ## Completion Criteria
 

@@ -380,6 +380,7 @@ Creates:
 - verified-facts table;
 - workflow-checkpoints table;
 - prompt-selections table for the operator-selected Bedrock prompt version;
+- Dev Tools controls table for admin-only, one-shot recovery plans;
 - operation-ledger table;
 - appropriate TTL configuration and point-in-time recovery.
 
@@ -417,6 +418,7 @@ VerifiedFactsTableName
 WorkflowCheckpointsTableName
 OperationLedgerTableName
 PromptSelectionsTableName
+DevToolsControlsTableName
 ```
 
 ### Stack 02 — S3 Vectors
@@ -549,7 +551,7 @@ Inputs:
 RuntimeImageUri
 ReasoningModelId = ${MODEL_ID}                 optional
 EnableModelReasoning = ${ENABLE_MODEL_REASONING} (default DISABLED)
-FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED)
+FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED; legacy direct-payload compatibility guard)
 RuntimeExecutionRoleArn = ${CF_OUT_RuntimeExecutionRoleArn}
 GatewayExecutionRoleArn = ${CF_OUT_GatewayExecutionRoleArn}
 GatewayPolicyMode = ${GATEWAY_POLICY_MODE}
@@ -561,6 +563,7 @@ ReportsBucketName = ${CF_OUT_ReportsBucketName}
 WorkflowCheckpointsTableName = ${CF_OUT_WorkflowCheckpointsTableName}
 OperationLedgerTableName = ${CF_OUT_OperationLedgerTableName}
 PromptSelectionsTableName = ${CF_OUT_PromptSelectionsTableName}
+DevToolsControlsTableName = ${CF_OUT_DevToolsControlsTableName}
 SearchIncidentsFunctionArn = ${CF_OUT_SearchIncidentsFunctionArn}
 GetCustomerInvoicesFunctionArn = ${CF_OUT_GetCustomerInvoicesFunctionArn}
 GetApplicationLogsFunctionArn = ${CF_OUT_GetApplicationLogsFunctionArn}
@@ -688,6 +691,7 @@ WorkflowCheckpointsTableName = ${CF_OUT_WorkflowCheckpointsTableName}
 WorkflowEventsTableName = ${CF_OUT_WorkflowEventsTableName}
 ReportsBucketName = ${CF_OUT_ReportsBucketName}
 PromptSelectionsTableName = ${CF_OUT_PromptSelectionsTableName}
+DevToolsControlsTableName = ${CF_OUT_DevToolsControlsTableName}
 PlannerPromptArn = ${CF_OUT_PlannerPromptArn}
 SynthesisPromptArn = ${CF_OUT_SynthesisPromptArn}
 PlannerPromptDefaultVersionArn = ${CF_OUT_PlannerPromptVersionArn}
@@ -918,30 +922,20 @@ Deploy Stacks 05 and 06. Start a one-incident workflow and verify:
 - traces and metrics contain the workflow/session ID;
 - failures generate useful stack and application events.
 
-To run the deterministic recovery test, deploy Stack 04 with
-`FailureInjectionEnabled=ENABLED`:
+To run the deterministic recovery test, sign in to the deployed console as an
+administrator and open the **Dev tools** tab. Enter a unique workflow ID such
+as `recovery-demo-1`, choose the checkpoint at which the Runtime should fail
+(for example **Read application logs**), set the expiry, and click **Arm
+failure plan**. The console copies that ID to the admin-only workflow field on
+the **Investigation** tab; submit the case with the same ID.
 
-```bash
-python3 cloudformation/deploy.py --environment dev --stack 04-agentcore --execute \
-  --set FailureInjectionEnabled=ENABLED
-```
-
-Then start the Stack 05 state machine with a payload like this:
-
-```json
-{
-  "workflow_id": "recovery-demo-1",
-  "customer_id": "ACME-482",
-  "tenant_id": "tenant_acme",
-  "request": "Investigate the duplicate invoice.",
-  "failure_after_step": "log_lookup"
-}
-```
-
-The Runtime fails once after durably writing `log_lookup`. Step Functions
-retries the same workflow, the Runtime hydrates the checkpoint, skips the
-completed stages, and finishes the investigation. The injection is opt-in and
-one-shot per workflow; disable `FailureInjectionEnabled` after the test.
+The Runtime fails once after durably writing the selected checkpoint. Step
+Functions retries the same workflow, the Runtime hydrates the checkpoint,
+skips the completed stages, and finishes the investigation. The Dev tools
+history changes from **ACTIVE** to **CONSUMED**. Click **Disarm** to cancel an
+armed plan before it is claimed. This control is intentionally available only
+in `dev` and `test`, and does not require changing CloudFormation for each
+exercise.
 
 ### Step 8 — Deploy the web console
 
@@ -956,6 +950,8 @@ Provide `BootstrapAdminEmail` for the first administrator invite. Open the
 - the admin-only Prompt library tab, which displays native Bedrock draft
   content, edits and saves drafts, creates new prompts, lists immutable
   versions, and activates a selected runtime version;
+- the admin-only Dev tools tab, which arms and disarms one-shot checkpoint
+  failures and shows the control history;
 - the Execution log popover with per-event payload details;
 - the visual workflow timeline with hover/focus result traces for returned
   incident, invoice, log, deployment, memory, and vector-evidence records; and

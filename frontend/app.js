@@ -119,19 +119,26 @@
 
   function renderIdentity() {
     const admin = groups().includes("admins");
+    const devToolsAvailable = admin && ["dev", "test"].includes(String(config.environment || "dev").toLowerCase());
     $("user-chip").textContent = `${state.claims.email || state.claims.username || "signed in"}${admin ? " · admin" : ""}`;
     show($("admin-panel"), admin);
     show($("prompts-tab"), admin);
+    show($("dev-tools-tab"), devToolsAvailable);
+    show($("workflow-id-wrap"), admin);
     if (!admin) selectTab("investigate");
     if (admin) loadUsers();
   }
 
   function selectTab(tab) {
-    const prompts = tab === "prompts" && groups().includes("admins");
-    show($("investigate-panel"), !prompts);
-    show($("prompts-panel"), prompts);
-    document.querySelectorAll("[data-tab]").forEach((button) => button.classList.toggle("active", button.dataset.tab === (prompts ? "prompts" : "investigate")));
-    if (prompts) loadPrompts();
+    const admin = groups().includes("admins");
+    const devToolsAvailable = admin && ["dev", "test"].includes(String(config.environment || "dev").toLowerCase());
+    const selected = admin && (tab === "prompts" || (tab === "dev-tools" && devToolsAvailable)) ? tab : "investigate";
+    show($("investigate-panel"), selected === "investigate");
+    show($("prompts-panel"), selected === "prompts");
+    show($("dev-tools-panel"), selected === "dev-tools");
+    document.querySelectorAll("[data-tab]").forEach((button) => button.classList.toggle("active", button.dataset.tab === selected));
+    if (selected === "prompts") loadPrompts();
+    if (selected === "dev-tools") loadDevTools();
   }
 
   async function api(path, options = {}) {
@@ -383,8 +390,8 @@
       const data = await api(`/api/investigations/${encodeURIComponent(state.workflowId)}`);
       $("run-title").textContent = `${data.customer_id || "Investigation"} · ${data.workflow_id}`;
       $("run-meta").innerHTML = `<span>${escapeHtml(data.tenant_id || "tenant")}</span><span>checkpoint: ${escapeHtml(data.step || "queued")}</span><span>${data.updated_at ? new Date(data.updated_at).toLocaleTimeString() : "starting"}</span>`;
-      const isDone = data.step === "completed"; const isFailed = data.events?.some((item) => item.status === "failed");
-      $("run-status").className = `status-pill ${isFailed ? "failed" : isDone ? "ready" : "running"}`; $("run-status").innerHTML = `<span></span> ${isFailed ? "Needs review" : isDone ? "Completed" : "Investigating"}`;
+      const isDone = data.step === "completed"; const hasInjectedFailure = data.events?.some((item) => item.event_type === "failure_injection" && item.status === "failed"); const isFailed = !hasInjectedFailure && data.events?.some((item) => item.status === "failed");
+      $("run-status").className = `status-pill ${isFailed ? "failed" : isDone ? "ready" : "running"}`; $("run-status").innerHTML = `<span></span> ${isFailed ? "Needs review" : isDone ? "Completed" : hasInjectedFailure ? "Recovering" : "Investigating"}`;
       renderFlow(data, data.events || []); renderEvents(data.events || []); renderReport(data.report);
       if (isDone || isFailed) { clearInterval(state.timer); state.timer = null; }
     } catch (error) { $("investigation-error").textContent = error.message; show($("investigation-error"), true); }
@@ -393,7 +400,10 @@
   async function startInvestigation(event) {
     event.preventDefault(); show($("investigation-error"), false);
     try {
-      const data = await api("/api/investigations", { method: "POST", body: JSON.stringify({ customer_id: $("customer-id").value.trim(), incident_id: $("incident-id").value.trim(), tenant_id: $("tenant-id").value.trim(), request: $("request-text").value.trim() }) });
+      const payload = { customer_id: $("customer-id").value.trim(), incident_id: $("incident-id").value.trim(), tenant_id: $("tenant-id").value.trim(), request: $("request-text").value.trim() };
+      const workflowId = groups().includes("admins") ? $("workflow-id").value.trim() : "";
+      if (workflowId) payload.workflow_id = workflowId;
+      const data = await api("/api/investigations", { method: "POST", body: JSON.stringify(payload) });
       state.workflowId = data.workflow_id; $("run-title").textContent = `${$("customer-id").value.trim()} · ${data.workflow_id}`; $("report-view").innerHTML = "<span>Investigation started…</span>"; $("flow-board").innerHTML = "<div class='empty-state'><div class='empty-icon'>◌</div><strong>Building the investigation map…</strong><span>Waiting for the first checkpoint.</span></div>"; $("flow-board").classList.add("empty-flow");
       if (state.timer) clearInterval(state.timer); await refreshWorkflow(); state.timer = setInterval(refreshWorkflow, 1400);
     } catch (error) { $("investigation-error").textContent = error.message; show($("investigation-error"), true); }
@@ -406,6 +416,71 @@
   async function createUser(event) {
     event.preventDefault(); show($("user-error"), false);
     try { await api("/api/admin/users", { method: "POST", body: JSON.stringify({ email: $("new-user-email").value.trim(), tenant_id: $("new-user-tenant").value.trim(), group: $("new-user-group").value }) }); $("user-form").reset(); $("new-user-tenant").value = "tenant_acme"; await loadUsers(); } catch (error) { $("user-error").textContent = error.message; show($("user-error"), true); }
+  }
+
+  function planDate(value) {
+    if (!value) return "date unavailable";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  function planExpiry(epoch) {
+    if (!epoch) return "no expiry";
+    const date = new Date(Number(epoch) * 1000);
+    return Number.isNaN(date.getTime()) ? "invalid expiry" : date.toLocaleString();
+  }
+
+  function failurePlanMarkup(plan) {
+    const status = String(plan.status || "UNKNOWN").toLowerCase();
+    const disable = plan.status === "ACTIVE"
+      ? `<button class="ghost-button plan-disable-button" type="button" data-disable-plan="${escapeHtml(plan.control_id)}">Disarm</button>`
+      : "";
+    return `<article class="failure-plan-row ${status}"><div class="failure-plan-main"><div class="failure-plan-heading"><strong>${escapeHtml(plan.workflow_id)}</strong><span class="plan-status ${status}">${escapeHtml(plan.status)}</span></div><div class="failure-plan-facts"><span>after <code>${escapeHtml(plan.step)}</code></span><span>expires ${escapeHtml(planExpiry(plan.expires_at_epoch))}</span><span>armed by ${escapeHtml(plan.created_by || "admin")}</span></div><div class="failure-plan-meta"><span>${escapeHtml(plan.control_id)}</span><span>${escapeHtml(planDate(plan.created_at))}</span>${plan.consumed_at ? `<span>consumed ${escapeHtml(planDate(plan.consumed_at))}</span>` : ""}</div></div>${disable}</article>`;
+  }
+
+  async function loadDevTools() {
+    if (!groups().includes("admins")) return;
+    show($("dev-tools-error"), false);
+    $("failure-plan-list").innerHTML = "<span class='empty-detail'>Loading failure plans…</span>";
+    try {
+      const data = await api("/api/admin/dev-tools");
+      $("dev-tools-environment").textContent = data.environment || "unknown";
+      const controls = data.controls || [];
+      $("dev-tools-count").textContent = controls.length;
+      $("failure-plan-list").innerHTML = controls.map(failurePlanMarkup).join("") || "<span class='empty-detail'>No failure plans have been armed.</span>";
+    } catch (error) {
+      $("failure-plan-list").innerHTML = "<span class='empty-detail'>Failure plans could not be loaded.</span>";
+      $("dev-tools-error").textContent = error.message;
+      show($("dev-tools-error"), true);
+    }
+  }
+
+  async function armFailurePlan(event) {
+    event.preventDefault();
+    show($("dev-tools-error"), false);
+    try {
+      const workflowId = $("dev-tools-workflow-id").value.trim();
+      const data = await api("/api/admin/dev-tools/failure-plans", {
+        method: "POST",
+        body: JSON.stringify({ workflow_id: workflowId, step: $("failure-plan-step").value, ttl_minutes: $("failure-plan-ttl").value }),
+      });
+      $("workflow-id").value = data.control.workflow_id;
+      await loadDevTools();
+    } catch (error) {
+      $("dev-tools-error").textContent = error.message;
+      show($("dev-tools-error"), true);
+    }
+  }
+
+  async function disableFailurePlan(controlId) {
+    show($("dev-tools-error"), false);
+    try {
+      await api(`/api/admin/dev-tools/failure-plans/${encodeURIComponent(controlId)}/disable`, { method: "POST", body: "{}" });
+      await loadDevTools();
+    } catch (error) {
+      $("dev-tools-error").textContent = error.message;
+      show($("dev-tools-error"), true);
+    }
   }
 
   function promptDate(value) {
@@ -497,8 +572,14 @@
   }
 
   $("login-form").addEventListener("submit", login); $("signout-button").addEventListener("click", signOut); $("investigation-form").addEventListener("submit", startInvestigation); $("user-form").addEventListener("submit", createUser); $("new-prompt-form").addEventListener("submit", createPrompt);
+  $("failure-plan-form").addEventListener("submit", armFailurePlan);
   document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => selectTab(button.dataset.tab)));
   $("refresh-prompts").addEventListener("click", loadPrompts);
+  $("refresh-dev-tools").addEventListener("click", loadDevTools);
+  $("failure-plan-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-disable-plan]");
+    if (button) disableFailurePlan(button.dataset.disablePlan);
+  });
   $("prompt-list").addEventListener("click", (event) => {
     const activate = event.target.closest("[data-activate-prompt]");
     const create = event.target.closest("[data-create-prompt]");
@@ -511,5 +592,6 @@
   $("close-event-popover").addEventListener("click", closeEventPopover);
   $("event-popover").addEventListener("click", (event) => { if (event.target.id === "event-popover") closeEventPopover(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeEventPopover(); });
+  $("failure-plan-step").innerHTML = FLOW.filter(([key]) => key !== "completed").map(([key, label]) => `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`).join("");
   if (!restoreAuth()) { show($("login-view"), true); show($("app-view"), false); }
 })();

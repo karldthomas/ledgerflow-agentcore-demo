@@ -21,6 +21,8 @@ Parameters:
     Type: String
   PromptSelectionsTableName:
     Type: String
+  DevToolsControlsTableName:
+    Type: String
   PlannerPromptArn:
     Type: String
   SynthesisPromptArn:
@@ -125,10 +127,17 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:PutItem
+                  - dynamodb:UpdateItem
                   - dynamodb:Scan
                 Resource:
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowCheckpointsTableName}
                   - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowEventsTableName}
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DevToolsControlsTableName}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DevToolsControlsTableName}/index/*
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
@@ -184,6 +193,7 @@ Resources:
           ENVIRONMENT_NAME: !Ref EnvironmentName
           KMS_KEY_ARN: !Ref KmsKeyArn
           PROMPT_SELECTIONS_TABLE: !Ref PromptSelectionsTableName
+          DEV_TOOLS_CONTROLS_TABLE: !Ref DevToolsControlsTableName
           PLANNER_PROMPT_ARN: !Ref PlannerPromptArn
           SYNTHESIS_PROMPT_ARN: !Ref SynthesisPromptArn
           PLANNER_PROMPT_DEFAULT_ARN: !Ref PlannerPromptDefaultVersionArn
@@ -294,6 +304,33 @@ Resources:
     Properties:
       ApiId: !Ref WebApi
       RouteKey: POST /api/admin/users
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  ListDevToolsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: GET /api/admin/dev-tools
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  ArmFailurePlanRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/dev-tools/failure-plans
+      AuthorizationType: JWT
+      AuthorizerId: !Ref WebApiAuthorizer
+      Target: !Sub integrations/${WebApiIntegration}
+
+  DisableFailurePlanRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebApi
+      RouteKey: POST /api/admin/dev-tools/failure-plans/{control_id}/disable
       AuthorizationType: JWT
       AuthorizerId: !Ref WebApiAuthorizer
       Target: !Sub integrations/${WebApiIntegration}

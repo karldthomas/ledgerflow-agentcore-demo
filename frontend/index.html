@@ -53,6 +53,7 @@
       <nav class="workspace-tabs" aria-label="Control room sections">
         <button class="workspace-tab active" type="button" data-tab="investigate">Investigation</button>
         <button id="prompts-tab" class="workspace-tab hidden" type="button" data-tab="prompts">Prompt library</button>
+        <button id="dev-tools-tab" class="workspace-tab hidden" type="button" data-tab="dev-tools">Dev tools</button>
       </nav>
 
       <section id="investigate-panel" class="workspace-grid tab-panel">
@@ -63,6 +64,7 @@
               <label>Customer ID<input id="customer-id" value="ACME-482" required /></label>
               <label>Incident ID <span class="optional">optional</span><input id="incident-id" value="INC-1042" placeholder="Let the agent find it" /></label>
               <label>Tenant<input id="tenant-id" value="tenant_acme" required /></label>
+              <label id="workflow-id-wrap" class="hidden">Workflow ID <span class="optional">admin recovery test</span><input id="workflow-id" placeholder="Use the ID armed in Dev tools" /></label>
               <label>Investigation request<textarea id="request-text" rows="5">Investigate the duplicate invoice after the payment retry timeout.</textarea></label>
               <button class="primary-button" type="submit"><span>Run investigation</span><span>→</span></button>
               <p id="investigation-error" class="form-error hidden"></p>
@@ -133,6 +135,28 @@
           </form>
         </section>
         <div id="prompt-list" class="prompt-list"><span class="empty-detail">Loading prompt definitions…</span></div>
+      </section>
+
+      <section id="dev-tools-panel" class="card prompts-panel dev-tools-panel tab-panel hidden">
+        <div class="section-heading">
+          <div><p class="eyebrow">ADMIN ONLY</p><h2>Dev tools</h2></div>
+          <div class="heading-actions"><span id="dev-tools-environment" class="confidence-badge">dev</span><button id="refresh-dev-tools" class="mini-button" type="button">Refresh</button></div>
+        </div>
+        <div class="dev-tools-warning"><strong>One-shot failure injection</strong><span>Arm a plan for one workflow and one checkpoint. The runtime fails after that checkpoint is durable, then the retry consumes the checkpoint and continues. This control is available only in dev and test environments.</span></div>
+        <p id="dev-tools-error" class="form-error hidden"></p>
+        <section class="new-prompt-card dev-tools-card">
+          <div class="prompt-editor-heading"><div><p class="eyebrow">RECOVERY TEST</p><h3>Arm a failure plan</h3></div><span class="prompt-type-badge">FAIL ONCE</span></div>
+          <form id="failure-plan-form" class="prompt-editor-form">
+            <div class="prompt-form-grid">
+              <label>Workflow ID<input id="dev-tools-workflow-id" required placeholder="recovery-demo-1" /></label>
+              <label>Fail after checkpoint<select id="failure-plan-step" required></select></label>
+            </div>
+            <div class="prompt-active-row"><label>Expires in<select id="failure-plan-ttl"><option value="5">5 minutes</option><option value="15" selected>15 minutes</option><option value="30">30 minutes</option><option value="60">60 minutes</option></select></label><button class="secondary-button" type="submit">Arm failure plan</button></div>
+          </form>
+          <p class="muted small-copy dev-tools-help">After arming, the ID is copied to the admin workflow field on the Investigation tab. Run that case with the same ID to exercise checkpoint recovery.</p>
+        </section>
+        <div class="section-heading dev-tools-list-heading"><div><p class="eyebrow">CONTROL HISTORY</p><h3>Failure plans</h3></div><span id="dev-tools-count" class="detail-count">0</span></div>
+        <div id="failure-plan-list" class="failure-plan-list"><span class="empty-detail">No failure plans have been armed.</span></div>
       </section>
     </main>
 

@@ -24,6 +24,7 @@ Parameters:
   FailureInjectionEnabled:
     Type: String
     Default: DISABLED
+    Description: Legacy direct-payload failure guard; admin Dev Tools plans do not require toggling this parameter.
     AllowedValues:
       - ENABLED
       - DISABLED
@@ -63,6 +64,8 @@ Parameters:
   OperationLedgerTableName:
     Type: String
   PromptSelectionsTableName:
+    Type: String
+  DevToolsControlsTableName:
     Type: String
   SearchIncidentsFunctionArn:
     Type: String
@@ -426,6 +429,7 @@ Resources:
         WORKFLOW_EVENTS_TABLE: !Ref WorkflowEventsTableName
         OPERATION_LEDGER_TABLE: !Ref OperationLedgerTableName
         PROMPT_SELECTIONS_TABLE: !Ref PromptSelectionsTableName
+        DEV_TOOLS_CONTROLS_TABLE: !Ref DevToolsControlsTableName
         PLANNER_PROMPT_ARN: !Ref PlannerPrompt
         PLANNER_PROMPT_DEFAULT_ARN: !Ref PlannerPromptVersion
         SYNTHESIS_PROMPT_ARN: !Ref SynthesisPrompt

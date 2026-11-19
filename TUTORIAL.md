@@ -588,11 +588,13 @@ On restart:
 
 The deployed Runtime implements this protocol with a versioned DynamoDB
 checkpoint and a conditional workflow lease. To verify it deterministically,
-enable the opt-in `FailureInjectionEnabled` stack parameter and invoke the
-workflow with `failure_after_step` set to `log_lookup`. The first attempt
-fails after the durable checkpoint; the Step Functions retry reuses the same
-`workflow_id`, loads the saved plan and records, and continues with the next
-stage. Disable the parameter after the exercise.
+an administrator opens the **Dev tools** tab in a `dev` or `test` deployment,
+arms a one-shot plan for a stable `workflow_id`, and selects `log_lookup` as
+the failure checkpoint. The administrator then submits the investigation with
+that same ID. The first attempt fails after the durable checkpoint; the Step
+Functions retry reuses the ID, loads the saved plan and records, and continues
+with the next stage. The Dev tools record becomes **CONSUMED**, and an active
+plan can be **DISARMED** before it is claimed.
 
 For this POC, all investigation tools are read-only. The operation ledger and
 reconciliation tests still model the boundary required before any financial

@@ -30,6 +30,20 @@ PLANNER_PROMPT_DEFAULT_ARN = os.environ.get("PLANNER_PROMPT_DEFAULT_ARN", "")
 SYNTHESIS_PROMPT_DEFAULT_ARN = os.environ.get("SYNTHESIS_PROMPT_DEFAULT_ARN", "")
 PROMPT_NAME_PREFIX = f"ledgerflow-{ENVIRONMENT_NAME}-"
 DEFAULT_PROMPT_MODEL_ID = "amazon.nova-micro-v1:0"
+DEV_TOOLS_CONTROLS_TABLE_NAME = os.environ.get("DEV_TOOLS_CONTROLS_TABLE", "")
+DEV_TOOLS_ENVIRONMENTS = {"dev", "test"}
+DEV_TOOL_STEPS = (
+    "started",
+    "planning",
+    "incident_lookup",
+    "invoice_lookup",
+    "log_lookup",
+    "deployment_lookup",
+    "retrieval",
+    "memory_lookup",
+    "report_synthesis",
+)
+WORKFLOW_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 stepfunctions = boto3.client("stepfunctions", region_name=REGION)
@@ -107,6 +121,145 @@ def _prompt_selection_table():
     if not PROMPT_SELECTIONS_TABLE_NAME:
         raise ValueError("prompt selection storage is not configured")
     return dynamodb.Table(PROMPT_SELECTIONS_TABLE_NAME)
+
+
+def _dev_tools_table():
+    if not DEV_TOOLS_CONTROLS_TABLE_NAME:
+        raise ValueError("Dev Tools storage is not configured")
+    return dynamodb.Table(DEV_TOOLS_CONTROLS_TABLE_NAME)
+
+
+def _require_dev_tools_access(claims: dict[str, Any]) -> None:
+    if not _is_admin(claims):
+        raise PermissionError("only admins can use Dev Tools")
+    if ENVIRONMENT_NAME.strip().lower() not in DEV_TOOLS_ENVIRONMENTS:
+        raise PermissionError("Dev Tools failure injection is only available in dev or test environments")
+
+
+def _dev_tool_status(item: dict[str, Any], now: int | None = None) -> str:
+    now = int(time.time()) if now is None else now
+    if not item.get("Enabled", False):
+        return "DISARMED"
+    if item.get("Consumed", False):
+        return "CONSUMED"
+    try:
+        if int(item.get("ExpiresAtEpoch", 0)) <= now:
+            return "EXPIRED"
+    except (TypeError, ValueError):
+        return "EXPIRED"
+    return "ACTIVE"
+
+
+def _dev_tool_view(item: dict[str, Any], now: int | None = None) -> dict[str, Any]:
+    now = int(time.time()) if now is None else now
+    return {
+        "control_id": str(item.get("ControlId") or ""),
+        "environment": str(item.get("Environment") or ENVIRONMENT_NAME),
+        "workflow_id": str(item.get("WorkflowId") or ""),
+        "step": str(item.get("Step") or ""),
+        "mode": str(item.get("Mode") or "fail_once"),
+        "status": _dev_tool_status(item, now),
+        "enabled": bool(item.get("Enabled", False)),
+        "consumed": bool(item.get("Consumed", False)),
+        "created_by": str(item.get("CreatedBy") or ""),
+        "created_at": str(item.get("CreatedAt") or ""),
+        "updated_at": str(item.get("UpdatedAt") or ""),
+        "expires_at_epoch": int(item.get("ExpiresAtEpoch", 0) or 0),
+        "consumed_at": str(item.get("ConsumedAt") or "") or None,
+        "consumed_by": str(item.get("ConsumedBy") or "") or None,
+        "disabled_at": str(item.get("DisabledAt") or "") or None,
+        "disabled_by": str(item.get("DisabledBy") or "") or None,
+    }
+
+
+def _list_dev_tools(claims: dict[str, Any]) -> dict[str, Any]:
+    _require_dev_tools_access(claims)
+    now = int(time.time())
+    response = _dev_tools_table().scan(Limit=100)
+    controls = [
+        _dev_tool_view(item, now)
+        for item in response.get("Items", [])
+        if isinstance(item, dict) and str(item.get("Environment") or ENVIRONMENT_NAME) == ENVIRONMENT_NAME
+    ]
+    controls.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    return {
+        "environment": ENVIRONMENT_NAME,
+        "enabled": ENVIRONMENT_NAME.strip().lower() in DEV_TOOLS_ENVIRONMENTS,
+        "steps": list(DEV_TOOL_STEPS),
+        "controls": controls,
+    }
+
+
+def _arm_failure_plan(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
+    _require_dev_tools_access(claims)
+    payload = _body(event)
+    workflow_id = str(payload.get("workflow_id") or "").strip()
+    step = str(payload.get("step") or "").strip()
+    if not WORKFLOW_ID_PATTERN.fullmatch(workflow_id):
+        raise ValueError("workflow_id must be 1-128 characters using letters, numbers, ., _, :, or -")
+    if step not in DEV_TOOL_STEPS:
+        raise ValueError(f"step must be one of: {', '.join(DEV_TOOL_STEPS)}")
+    try:
+        ttl_minutes = int(payload.get("ttl_minutes", 15))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ttl_minutes must be an integer between 1 and 120") from exc
+    if ttl_minutes < 1 or ttl_minutes > 120:
+        raise ValueError("ttl_minutes must be an integer between 1 and 120")
+
+    now_epoch = int(time.time())
+    existing = _dev_tools_table().query(
+        IndexName="WorkflowStepIndex",
+        KeyConditionExpression=Key("WorkflowId").eq(workflow_id) & Key("Step").eq(step),
+        Limit=50,
+    ).get("Items", [])
+    for item in existing:
+        if isinstance(item, dict) and _dev_tool_status(item, now_epoch) == "ACTIVE":
+            raise ValueError("an active failure plan already exists for this workflow and step")
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    control_id = f"failure-{uuid4().hex}"
+    item = {
+        "ControlId": control_id,
+        "Environment": ENVIRONMENT_NAME,
+        "WorkflowId": workflow_id,
+        "Step": step,
+        "Mode": "fail_once",
+        "Enabled": True,
+        "Consumed": False,
+        "CreatedBy": str(claims.get("email") or claims.get("username") or claims.get("sub") or "admin"),
+        "CreatedAt": now,
+        "UpdatedAt": now,
+        "ExpiresAtEpoch": now_epoch + (ttl_minutes * 60),
+    }
+    _dev_tools_table().put_item(Item=item, ConditionExpression="attribute_not_exists(ControlId)")
+    return _dev_tool_view(item, now_epoch)
+
+
+def _disable_failure_plan(control_id: str, claims: dict[str, Any]) -> dict[str, Any]:
+    _require_dev_tools_access(claims)
+    normalized_id = str(control_id or "").strip()
+    if not normalized_id:
+        raise ValueError("control_id is required")
+    table = _dev_tools_table()
+    current = table.get_item(Key={"ControlId": normalized_id}).get("Item")
+    if not current or str(current.get("Environment") or ENVIRONMENT_NAME) != ENVIRONMENT_NAME:
+        raise ValueError("failure plan does not exist")
+    if _dev_tool_status(current) == "CONSUMED":
+        return _dev_tool_view(current)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    updated = table.update_item(
+        Key={"ControlId": normalized_id},
+        UpdateExpression="SET #enabled = :false, DisabledAt = :now, DisabledBy = :actor, UpdatedAt = :now",
+        ExpressionAttributeNames={"#enabled": "Enabled"},
+        ExpressionAttributeValues={
+            ":false": False,
+            ":now": now,
+            ":actor": str(claims.get("email") or claims.get("username") or claims.get("sub") or "admin"),
+        },
+        ConditionExpression="attribute_exists(ControlId)",
+        ReturnValues="ALL_NEW",
+    )
+    return _dev_tool_view(updated.get("Attributes", {}))
 
 
 def _put_event(workflow_id: str, tenant_id: str, event_type: str, step: str, status: str, payload: dict[str, Any]) -> None:
@@ -198,7 +351,13 @@ def _create_investigation(event: dict[str, Any], claims: dict[str, Any]) -> dict
     customer_id = str(payload.get("customer_id", "")).strip()
     if not customer_id:
         raise ValueError("customer_id is required")
-    workflow_id = f"web-{uuid4().hex}"
+    requested_workflow_id = str(payload.get("workflow_id") or "").strip()
+    if requested_workflow_id:
+        if not _is_admin(claims):
+            raise PermissionError("only admins can choose a workflow_id")
+        if not WORKFLOW_ID_PATTERN.fullmatch(requested_workflow_id):
+            raise ValueError("workflow_id must be 1-128 characters using letters, numbers, ., _, :, or -")
+    workflow_id = requested_workflow_id or f"web-{uuid4().hex}"
     tenant_id = _tenant(claims, payload.get("tenant_id"))
     request = str(payload.get("request") or "Investigate the customer incident.")
     input_payload = {
@@ -618,6 +777,12 @@ def _api(event: dict[str, Any], path: str, claims: dict[str, Any]) -> dict[str, 
         return _response(200, {"users": _list_users(claims)})
     if parts == ["api", "admin", "users"] and method == "POST":
         return _response(201, _create_user(event, claims))
+    if parts == ["api", "admin", "dev-tools"] and method == "GET":
+        return _response(200, _list_dev_tools(claims))
+    if parts == ["api", "admin", "dev-tools", "failure-plans"] and method == "POST":
+        return _response(201, {"control": _arm_failure_plan(event, claims)})
+    if len(parts) == 6 and parts[:4] == ["api", "admin", "dev-tools", "failure-plans"] and parts[5] == "disable" and method == "POST":
+        return _response(200, {"control": _disable_failure_plan(parts[4], claims)})
     if parts == ["api", "admin", "prompts"] and method == "POST":
         return _response(201, _create_prompt(event, claims))
     if parts == ["api", "admin", "prompts"] and method == "GET":
@@ -643,7 +808,7 @@ def _static(path: str) -> dict[str, Any]:
     if path == "/config.js":
         body = (
             "window.LEDGERFLOW_CONFIG = "
-            + json.dumps({"region": REGION, "userPoolId": USER_POOL_ID, "clientId": USER_POOL_CLIENT_ID})
+            + json.dumps({"region": REGION, "environment": ENVIRONMENT_NAME, "userPoolId": USER_POOL_ID, "clientId": USER_POOL_CLIENT_ID})
             + ";"
         )
         return _response(200, body, "application/javascript; charset=utf-8")

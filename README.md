@@ -17,7 +17,8 @@ demonstrates:
 - AgentCore Memory with tenant namespaces and expiration;
 - versioned DynamoDB checkpoints, workflow leases, and idempotent report publication;
 - Step Functions durable workflow execution; and
-- operator-visible reasoning summaries, execution logs, and typed reports.
+- operator-visible reasoning summaries, execution logs, typed reports, and
+  admin-only Dev tools for deterministic recovery exercises.
 
 The AWS Runtime stores its planner and report-synthesis instructions in
 Amazon Bedrock Prompt Management. Each investigation resolves an immutable
@@ -139,33 +140,28 @@ corpus, deploys all eight stacks, and prints the Cognito-protected console URL.
 
 ## Deterministic recovery test
 
-Failure injection is disabled by default. To exercise checkpoint recovery,
-deploy Stack 04 with `FailureInjectionEnabled=ENABLED`:
+The deployed dev and test consoles include an admin-only Dev tools tab. It
+arms a one-shot failure plan in DynamoDB; no CloudFormation parameter change is
+needed for each test.
 
-```bash
-python3 cloudformation/deploy.py --environment dev --stack 04-agentcore --execute \
-  --set FailureInjectionEnabled=ENABLED
-```
+1. Sign in as a Cognito user in the `admins` group and open **Dev tools**.
+2. Enter a unique workflow ID such as `recovery-demo-1`, choose **Read
+   application logs**, choose a short expiry, and click **Arm failure plan**.
+3. Open **Investigation**. The workflow ID is copied into the admin-only
+   workflow field. Submit the case with that same ID.
+4. The first attempt fails after the selected durable checkpoint. Step
+   Functions retries the same workflow, the Runtime skips completed stages,
+   and the investigation finishes. The plan changes to **CONSUMED** in Dev
+   tools.
 
-Then start a Step Functions execution with a stable `workflow_id` and
-`failure_after_step=log_lookup`:
+To cancel a plan before it runs, click **Disarm** in the plan history. The
+control is restricted to `dev` and `test` deployments and is not available in
+production environments.
 
-```json
-{
-  "workflow_id": "recovery-demo-1",
-  "customer_id": "ACME-482",
-  "tenant_id": "tenant_acme",
-  "request": "Investigate the duplicate invoice.",
-  "failure_after_step": "log_lookup"
-}
-```
-
-The first Runtime attempt writes the `log_lookup` checkpoint and fails
-deliberately. The Step Functions retry loads that checkpoint, skips the
-completed incident, invoice, and log stages, and continues with deployment
-lookup. The failure is one-shot per workflow because the checkpoint records
-that the injection was consumed. Set `FailureInjectionEnabled=DISABLED` again
-after the test.
+The runtime claims the plan with a DynamoDB conditional update, so concurrent
+workers cannot consume it twice. The older `failure_after_step` Runtime input
+remains available for automated compatibility tests and is still gated by the
+legacy `FailureInjectionEnabled` environment setting.
 
 ## Architecture
 

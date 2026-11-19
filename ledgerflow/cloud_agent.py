@@ -23,6 +23,7 @@ from .reasoning import BedrockReportReasoner, ModelReasoningError
 
 WORKFLOW_STATE_SCHEMA_VERSION = "ledgerflow.workflow.v1"
 WORKFLOW_LEASE_SECONDS = 60
+DEV_TOOLS_ENVIRONMENTS = {"dev", "test"}
 
 
 class WorkflowInProgressError(RuntimeError):
@@ -254,6 +255,8 @@ class CloudInvestigationHandler:
             and failure_after_step == step
             and not getattr(self, "failure_injection_consumed", False)
         )
+        failure_source = "payload" if inject_failure else ""
+        failure_control_id: str | None = None
         if inject_failure:
             self.failure_injection_consumed = True
         if table_name:
@@ -297,18 +300,106 @@ class CloudInvestigationHandler:
                     "failure_injection_consumed": bool(getattr(self, "failure_injection_consumed", False)),
                 },
             )
+            if not inject_failure:
+                dynamic_plan = self._claim_dynamic_failure(workflow_id, step)
+                if dynamic_plan:
+                    inject_failure = True
+                    failure_source = "dev_tools"
+                    failure_control_id = str(dynamic_plan.get("ControlId") or "")
+                    self.failure_injection_consumed = True
         if inject_failure:
             self._emit(
                 "failure_injection",
                 step,
                 "failed",
-                {"failure_after_step": step, "checkpoint_durable": bool(table_name)},
+                {
+                    "failure_after_step": step,
+                    "checkpoint_durable": bool(table_name),
+                    "source": failure_source or "payload",
+                    **({"control_id": failure_control_id} if failure_control_id else {}),
+                },
             )
             # This is a controlled crash simulation. Releasing the lease makes
             # the next Step Functions retry deterministic; an actual process
             # crash leaves the lease to expire normally.
             self._release_workflow_lease(workflow_id)
             raise DeterministicFailure(f"deterministic failure injected after checkpoint {step}")
+
+    def _claim_dynamic_failure(self, workflow_id: str, step: str) -> dict[str, Any] | None:
+        """Atomically claim an admin-armed, one-shot failure plan.
+
+        Dev Tools plans are deliberately available only in non-production
+        environments. The query is indexed by workflow and step, while the
+        conditional update is the source of truth for the one-shot claim.
+        A missing or temporarily unavailable control table fails closed for
+        normal investigations; it must never make the runtime unavailable.
+        """
+
+        environment = os.environ.get("LEDGERFLOW_ENVIRONMENT", "").strip().lower()
+        table_name = os.environ.get("DEV_TOOLS_CONTROLS_TABLE", "").strip()
+        if step == "completed" or environment not in DEV_TOOLS_ENVIRONMENTS or not table_name:
+            return None
+        try:
+            from boto3.dynamodb.conditions import Key
+
+            table = self.dynamodb.Table(table_name)
+            response = table.query(
+                IndexName="WorkflowStepIndex",
+                KeyConditionExpression=Key("WorkflowId").eq(workflow_id) & Key("Step").eq(step),
+                ScanIndexForward=False,
+                Limit=20,
+            )
+        except Exception as exc:
+            print(json.dumps({"event": "dev_tools_failure_plan_degraded", "error": str(exc)}))
+            return None
+
+        now = int(time.time())
+        candidates = sorted(
+            [
+                item
+                for item in response.get("Items", [])
+                if isinstance(item, dict)
+                and str(item.get("WorkflowId") or "") == workflow_id
+                and str(item.get("Step") or "") == step
+            ],
+            key=lambda item: str(item.get("CreatedAt") or ""),
+            reverse=True,
+        )
+        for item in candidates:
+            control_id = str(item.get("ControlId") or "")
+            if not control_id or not item.get("Enabled", False) or item.get("Consumed", False):
+                continue
+            try:
+                expires_at = int(item.get("ExpiresAtEpoch", 0))
+            except (TypeError, ValueError):
+                continue
+            if expires_at <= now:
+                continue
+            try:
+                table.update_item(
+                    Key={"ControlId": control_id},
+                    UpdateExpression="SET Consumed = :true, ConsumedAt = :updated, ConsumedBy = :worker, UpdatedAt = :updated",
+                    ConditionExpression=(
+                        "Enabled = :enabled AND "
+                        "(attribute_not_exists(Consumed) OR Consumed = :false) AND "
+                        "ExpiresAtEpoch > :now"
+                    ),
+                    ExpressionAttributeValues={
+                        ":true": True,
+                        ":false": False,
+                        ":enabled": True,
+                        ":now": now,
+                        ":worker": self.worker_id,
+                        ":updated": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except Exception as exc:
+                if self._is_conditional_failure(exc):
+                    continue
+                print(json.dumps({"event": "dev_tools_failure_plan_claim_degraded", "error": str(exc)}))
+                continue
+            return item
+        return None
 
     @staticmethod
     def _failure_after_step(payload: dict[str, Any]) -> str | None:
