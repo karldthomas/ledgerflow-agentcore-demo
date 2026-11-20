@@ -70,10 +70,11 @@ objective.
 The checked-in Runtime image owns the safety and state boundaries. When
 `ENABLE_MODEL_REASONING=ENABLED` and `MODEL_ID` are set, the Runtime first
 resolves the active native Bedrock Prompt Management version and calls Bedrock
-Converse to refine the investigation goal, incident query, evidence query, and
-read-only evidence categories. It then calls the selected Gateway targets and
-makes a second Converse call through the active synthesis prompt version to
-produce the evidence-grounded report. The deployed development stack uses
+Converse to classify the task, refine the investigation goal, incident query,
+and evidence query. The application then maps the task to a deterministic
+retrieval policy before calling the selected Gateway targets. A second
+Converse call through the active synthesis prompt version produces the
+evidence-grounded report. The deployed development stack uses
 `amazon.nova-micro-v1:0`.
 
 The fixed instructions are no longer assembled in Python. They live in the
@@ -86,7 +87,8 @@ create immutable versions, and activate a version. The editor writes directly
 to the Bedrock draft; it does not create a second prompt store.
 
 `ledgerflow/planner.py` constrains the planning output to a small validated
-schema. `ledgerflow/reasoning.py` constrains the final response to JSON, keeps
+schema. `ledgerflow/retrieval_policies.py` maps the validated task type to a
+bounded source and ranking recipe. `ledgerflow/reasoning.py` constrains the final response to JSON, keeps
 only citations that exist in the evidence packet, filters financial-write
 recommendations, and falls back to the deterministic report on an invalid or
 unavailable model response.
@@ -197,9 +199,10 @@ cloudformation/
     07-web-app.yaml
     07-web-app.json
   deploy.py
+  sam_deploy.py
   validate.py
   ingest.py
-  package_artifacts.py
+  requirements.txt
   scripts/
     replace_environment_vars.py
     config_to_parameters.py
@@ -282,7 +285,7 @@ AWS::S3Vectors::VectorBucketPolicy
 AWS::S3Vectors::Index
 AWS::DynamoDB::Table
 AWS::ECR::Repository
-AWS::Lambda::Function
+AWS::Serverless::Function (translated to AWS::Lambda::Function)
 AWS::StepFunctions::StateMachine
 AWS::BedrockAgentCore::Runtime
 AWS::BedrockAgentCore::RuntimeEndpoint
@@ -313,22 +316,48 @@ This is still infrastructure-as-code: the resource, role, endpoint, and image
 reference are declared in CloudFormation. The image build is simply an
 artifact-production step.
 
+### The SAM deployment boundary
+
+The four stacks that contain Lambda code use the
+`AWS::Serverless-2016-10-31` transform. Their templates describe the handler,
+runtime, role, timeout, environment, and a repository `CodeUri`; they do not
+contain an S3 key for a hand-built ZIP. `cloudformation/sam_deploy.py` resolves
+the ordinary stack-output context. It stages only the source needed by those
+four stacks, runs `sam build` for every stack, and then runs `sam deploy` for
+every stack. Infrastructure-only stacks still go through the SAM build
+translation boundary, but produce no Lambda artifact:
+
+```text
+Every stack:  SAM build -> template translation
+Lambda stack: SAM build -> dependency installation and artifact assembly
+Every stack:  SAM deploy -> managed upload (when needed) and CloudFormation change set
+```
+
+After Stack 00 creates it, the artifact bucket is passed to SAM as the staging
+bucket for later stacks. This keeps the application source, dependency
+installation, and CloudFormation resource definition in one repeatable path
+while avoiding accidental packaging of the repository's tests, documentation,
+or deployment-only data. Stack 00 is small enough to deploy without a staging
+bucket; it creates the scoped bucket used by later stacks. `deploy-all.sh`
+invokes the SAM adapter for all eight stacks.
+`deploy.py --plan` remains the context-aware no-write preview.
+
 ### Deployment flow
 
 The deployment workflow is:
 
 ```bash
 python3 cloudformation/validate.py
-python3 cloudformation/deploy.py \
+python3 cloudformation/sam_deploy.py \
   --environment dev \
-  --stack 00-security \
-  --execute
+  --region "$AWS_REGION" \
+  --context-file cloudformation/build/deployment-context-dev.json \
+  --stack 00-security
 ```
 
-Run the stacks in order, with the artifact build and S3 Vectors ingestion steps
-between the infrastructure stacks. In CI, use
-`--change-set --stack STACK_ID`, review the returned ID, and apply that exact ID
-with `--execute-change-set` before creating the next stack's change set. No
+Run the stacks in order, with the Runtime image build and S3 Vectors ingestion
+steps between the infrastructure stacks. Invoke `sam_deploy.py` for every
+stack, passing the Stack 00 artifact bucket after bootstrap. No
 `Fn::ImportValue` is required.
 
 ## 3. Store the data in the right place
@@ -482,22 +511,56 @@ compact context and validate invariants
 generate structured report
       |
       v
-verify citations and constraints
+deterministic pre-publication contract gate
       |
       v
-checkpoint and return report
+publish report
+      |
+      v
+Step Functions post-run audit -> operator timeline and execution log
 ```
 
-The task classifier controls retrieval strategy, not permissions:
+### Task-aware retrieval policies
 
-| Task | Retrieval behavior |
-|---|---|
-| Explanation | Runbooks and authoritative documentation |
-| Investigation | Logs, invoices, deployments, runbooks, and current memory |
-| Financial action | Current invoice state, approval policy, and explicit authorization |
+The planner now returns a small, validated `task_type`: `investigation`,
+`explanation`, or `verification`. The runtime maps that value to the
+deterministic registry in `ledgerflow/retrieval_policies.py`. The model can
+classify the request and refine the query, but it cannot invent a policy,
+choose a tenant, grant permission, or select an arbitrary tool.
 
-The initial POC implements the financial-action path as read-only and denies
-financial writes.
+The deployed console also exposes a **Task type** selector. **Let the planner
+classify** sends no override; choosing a task sends an explicit type through
+the API. Both paths end in the same policy registry, so the retrieval recipe
+is bounded and observable either way.
+
+| Policy | Sources and strategy | Current limits |
+|---|---|---|
+| `investigation-v1` | Incident, invoices, logs, deployments, hybrid S3 Vectors, and verified memory | 500 logs, 8 vector results |
+| `explanation-v1` | Incident/deployment context plus runbook-only semantic-oriented evidence | 5 vector results, no invoice/log/memory lookup |
+| `verification-v1` | Current structured incident, invoice, log, and deployment records plus authoritative runbook corroboration | 250 logs, 8 vector results |
+
+All three policies remain read-only and tenant-scoped. `search_evidence` keeps
+the tenant filter in the service, then applies the policy's source-type scope
+and ranking strategy. `hybrid` preserves the normal fused ranking,
+`semantic` favors conceptual similarity for explanations, and `authoritative`
+favors active, high-authority, identifier-matching evidence for verification.
+
+The runtime records a `retrieval_policy` event containing the task type,
+policy ID, source list, strategy, and limits. The selected plan and final
+report also carry the task type, so an operator can compare the requested task
+with the evidence actually collected.
+
+No separate classifier prompt is required. The existing Bedrock planner prompt
+was versioned with the new `task_type` field. If the prompt is unavailable or
+returns invalid JSON, the runtime uses an explicit UI/API task type when
+present, otherwise a small deterministic keyword fallback, and finally the
+bounded `investigation-v1` policy. This is a safety fallback, not an attempt
+to reproduce model reasoning.
+
+The remaining case-study work is intentionally separate: iterative retrieval,
+source freshness rules, retrieval benchmarks, and a full financial-operation
+approval path are not enabled by this change. The current financial-operation
+scope remains read-only.
 
 ## 6. Implement memory correctly
 
@@ -847,6 +910,40 @@ The report also includes a machine-readable evidence contract:
 }
 ```
 
+### Deterministic validation inside and outside the Runtime
+
+The deployed workflow uses two complementary deterministic checks. They are
+not two different sources of truth and they do not expose private model
+reasoning. They validate the structured artifacts that the model and tools
+produced:
+
+1. **Pre-publication gate (inside AgentCore Runtime).** After report synthesis,
+   the Runtime checks the task policy, tenant scope, evidence schema, required
+   citations, typed claim citations, source exclusions, memory boundary, and
+   read-only tool contract. The report is published only when this gate passes.
+   A failed gate raises a retryable workflow failure before the report is
+   marked complete.
+2. **Post-run audit (Step Functions).** After the Runtime returns, the state
+   machine invokes `WorkflowAuditFunction`. The Lambda rereads the durable
+   checkpoint and event records, reconstructs the evidence packet, runs the
+   same audit contract in `post_run` mode, and writes a
+   `deterministic_audit` event. Step Functions then completes successfully or
+   completes with findings based on the audit result.
+
+The distinction is useful for a demo: the first check protects publication at
+the point where the report is created, while the second demonstrates that an
+independent workflow step can verify the persisted result after the Runtime
+has finished. The audit is intentionally a contract check, not a quality
+score. It can prove that a citation is authorized and a policy boundary was
+kept; it cannot prove that a root-cause hypothesis is true in the real world.
+
+The console surfaces both layers. The timeline has **Validate report** and
+**Audit result** stages, the report displays the latest audit summary, and the
+Execution log contains the bounded JSON payload with check names, pass/fail
+counts, and failed-check identifiers. Click or focus a timeline stage to see
+the event trace and returned data. The report is still read-only and no audit
+step can authorize a financial write.
+
 To exercise a different branch, submit an investigation for `ACME-488` for a
 reconciled timeout or `ACME-485` for a configuration failure through the
 deployed console or API. The deployed tenant has the same cases under
@@ -899,15 +996,20 @@ ledgerflow-agent/
     models.py
     planner.py
     prompting.py
+    retrieval_policies.py
     reasoning.py
     runtime_entry.py
     runtime_server.py
   cloudformation/
+    deployment.yaml          stack graph and lifecycle-step manifest
+    manifest.py              manifest parser and dependency validation
+    orchestrate.py           one-command lifecycle runner
     stacks/                  matching YAML/JSON stack pairs
-    deploy.py                plan/change-set/execute orchestrator
+    deploy.py                dependency plan and context resolver
+    sam_deploy.py            SAM deploy adapter for all eight stacks
     validate.py              no-AWS contract validation
     ingest.py                DynamoDB/S3/S3-Vectors fixture loader
-    package_artifacts.py     Lambda packaging/upload helper
+    requirements.txt         SAM dependency manifest for the custom resource
   lambda/tool_handler.py     read-only Gateway target handlers
   tests/
     test_context_compaction.py

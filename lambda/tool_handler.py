@@ -139,7 +139,7 @@ def _embedding(text: str) -> list[float]:
     return json.loads(response["body"].read())["embedding"]
 
 
-def _rerank_evidence(vectors: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+def _rerank_evidence(vectors: list[dict[str, Any]], query: str, strategy: str = "hybrid") -> list[dict[str, Any]]:
     """Apply a small deterministic authority/freshness/identifier rerank.
 
     S3 Vectors remains responsible for BM25/vector fusion and native RRF. This
@@ -148,6 +148,7 @@ def _rerank_evidence(vectors: list[dict[str, Any]], query: str) -> list[dict[str
     """
 
     query_terms = {term.lower() for term in query.split() if len(term) > 2}
+    strategy = strategy if strategy in {"hybrid", "semantic", "authoritative"} else "hybrid"
     scored: list[tuple[float, int, dict[str, Any]]] = []
     for position, original in enumerate(vectors):
         item = dict(original)
@@ -158,7 +159,17 @@ def _rerank_evidence(vectors: list[dict[str, Any]], query: str) -> list[dict[str
         freshness = 0.001 if metadata.get("status") == "active" else 0.0
         searchable = f"{metadata.get('title', '')} {metadata.get('text', '')}".lower()
         identifier_hits = sum(1 for term in query_terms if term in searchable)
-        rerank_score = fused + (authority * 0.0001) + freshness + (identifier_hits * 0.00001)
+        vector_score = float(scores.get("vector", 0.0) or 0.0)
+        if strategy == "semantic":
+            # Semantic explanations favor conceptual similarity while still
+            # retaining the native hybrid result as a tie-breaker.
+            rerank_score = vector_score + (fused * 0.1) + (authority * 0.0001)
+        elif strategy == "authoritative":
+            # Verification favors current, authoritative documents and exact
+            # identifiers over a merely similar passage.
+            rerank_score = fused + (authority * 0.001) + (freshness * 10) + (identifier_hits * 0.0001)
+        else:
+            rerank_score = fused + (authority * 0.0001) + freshness + (identifier_hits * 0.00001)
         item["application_rerank_score"] = rerank_score
         scored.append((rerank_score, -position, item))
     scored.sort(key=lambda value: (value[0], value[1]), reverse=True)
@@ -168,6 +179,15 @@ def _rerank_evidence(vectors: list[dict[str, Any]], query: str) -> list[dict[str
 def search_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
     tenant_id = arguments["tenant_id"]
     query = str(arguments.get("query", ""))
+    strategy = str(arguments.get("strategy", "hybrid")).strip().lower()
+    if strategy not in {"hybrid", "semantic", "authoritative"}:
+        strategy = "hybrid"
+    top_k = min(int(arguments.get("top_k", 8)), 100)
+    source_types = {
+        str(value).strip().lower()
+        for value in arguments.get("source_types", [])
+        if str(value).strip()
+    }
     vector = arguments.get("query_vector") or _embedding(query)
     query_args: dict[str, Any] = {
         "vectorBucketName": os.environ["VECTOR_BUCKET_NAME"],
@@ -175,7 +195,9 @@ def search_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
         "queryVector": {"float32": [float(value) for value in vector]},
         "queryTexts": [{"metadataKey": "text", "text": query}, {"metadataKey": "title", "text": query}],
         "queryMode": "ENHANCED",
-        "topK": min(int(arguments.get("top_k", 8)), 100),
+        # Fetch extra candidates when the selected policy narrows the
+        # document source types after the tenant filter.
+        "topK": min(max(top_k, top_k * 4 if source_types else top_k), 100),
         "returnMetadata": True,
         "returnScores": True,
     }
@@ -183,8 +205,21 @@ def search_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
     # filters are applied before search, so another tenant cannot be returned.
     query_args["filter"] = {"$or": [{"tenant_id": tenant_id}, {"tenant_id": "public"}]}
     response = s3vectors.query_vectors(**query_args)
-    vectors = _rerank_evidence(response.get("vectors", []), query)
-    return {"items": _json_safe(vectors), "count": len(vectors), "read_only": True, "ranking": "native_rrf_then_authority_rerank"}
+    vectors = _rerank_evidence(response.get("vectors", []), query, strategy)
+    if source_types:
+        vectors = [
+            item
+            for item in vectors
+            if str((item.get("metadata") or {}).get("source_type", "")).strip().lower() in source_types
+        ]
+    vectors = vectors[:top_k]
+    return {
+        "items": _json_safe(vectors),
+        "count": len(vectors),
+        "read_only": True,
+        "ranking": f"{strategy}:native_rrf_then_application_rerank",
+        "source_types": sorted(source_types),
+    }
 
 
 HANDLERS = {

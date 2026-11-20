@@ -17,10 +17,10 @@ import subprocess
 from pathlib import Path
 
 try:
-    from .deploy import STACK_ORDER
+    from .manifest import DEFAULT_MANIFEST_PATH, DeploymentManifest, load_manifest
     from .scripts.validate_stack_contract import validate as validate_contract
 except ImportError:  # Running as ``python cloudformation/validate.py``.
-    from deploy import STACK_ORDER
+    from manifest import DEFAULT_MANIFEST_PATH, DeploymentManifest, load_manifest
     from scripts.validate_stack_contract import validate as validate_contract
 
 
@@ -32,7 +32,7 @@ FORBIDDEN = ("Fn::ImportValue", "Export:", "AWS::CloudFormation::Stack")
 # The installed cfn-lint catalog can lag newly released AWS resource types.
 # These checks are deferred here because the templates are validated against
 # the live CloudFormation service at deployment time as well.
-NEW_RESOURCE_CATALOG_CHECKS = ("E3001", "E1010", "E1019")
+NEW_RESOURCE_CATALOG_CHECKS = ("E3001", "E3002", "E1010", "E1019")
 
 
 def output_names(template: str) -> set[str]:
@@ -61,17 +61,31 @@ def configured_placeholders(config_path: Path) -> set[str]:
     return placeholders
 
 
-def validate_repository(stacks_dir: Path) -> list[str]:
+def _stack_paths(stacks_dir: Path | None, manifest: DeploymentManifest, stack_id: str) -> tuple[Path, Path]:
+    if stacks_dir is not None:
+        template_path = stacks_dir / f"{stack_id}.yaml"
+        return template_path, template_path.with_suffix(".json")
+    definition = manifest.definition(stack_id)
+    return definition.template_path, definition.config_path
+
+
+def validate_repository(
+    stacks_dir: Path | None = None,
+    *,
+    manifest: DeploymentManifest | None = None,
+) -> list[str]:
+    deployment_manifest = manifest or load_manifest(DEFAULT_MANIFEST_PATH)
+    if stacks_dir is None:
+        stacks_dir = deployment_manifest.path.parent / "stacks"
     errors: list[str] = []
     templates = {path.stem for path in stacks_dir.glob("*.yaml")}
-    expected = set(STACK_ORDER)
+    expected = set(deployment_manifest.stack_ids)
     if templates != expected:
         errors.append(f"expected stack templates {sorted(expected)}, found {sorted(templates)}")
 
     producer_outputs: dict[str, set[str]] = {}
-    for index, stack_id in enumerate(STACK_ORDER):
-        template_path = stacks_dir / f"{stack_id}.yaml"
-        config_path = stacks_dir / f"{stack_id}.json"
+    for stack_id in deployment_manifest.stack_ids:
+        template_path, config_path = _stack_paths(stacks_dir, deployment_manifest, stack_id)
         if not template_path.exists():
             errors.append(f"missing template: {template_path}")
             continue
@@ -85,7 +99,9 @@ def validate_repository(stacks_dir: Path) -> list[str]:
                 errors.append(f"{stack_id}: forbidden CloudFormation coupling {marker}")
         producer_outputs[stack_id] = output_names(template)
 
-        prior_outputs = set().union(*(producer_outputs.get(previous, set()) for previous in STACK_ORDER[:index]))
+        prior_outputs = set().union(
+            *(producer_outputs.get(previous, set()) for previous in deployment_manifest.predecessors(stack_id))
+        )
         for placeholder in sorted(configured_placeholders(config_path)):
             if not placeholder.startswith("CF_OUT_"):
                 continue
@@ -97,15 +113,28 @@ def validate_repository(stacks_dir: Path) -> list[str]:
     return errors
 
 
-def run_cfn_lint(stacks_dir: Path) -> tuple[list[str], list[str]]:
+def run_cfn_lint(
+    stacks_dir: Path | None = None,
+    *,
+    manifest: DeploymentManifest | None = None,
+) -> tuple[list[str], list[str]]:
+    deployment_manifest = manifest or load_manifest(DEFAULT_MANIFEST_PATH)
+    if stacks_dir is None:
+        stacks_dir = deployment_manifest.path.parent / "stacks"
     executable = shutil.which("cfn-lint")
     if not executable:
         return [], ["cfn-lint is not installed; skipped template schema validation"]
     command = [
         executable,
         "--ignore-checks",
-        ",".join(NEW_RESOURCE_CATALOG_CHECKS),
-        *[str(stacks_dir / f"{stack_id}.yaml") for stack_id in STACK_ORDER],
+        *NEW_RESOURCE_CATALOG_CHECKS,
+        "--non-zero-exit-code",
+        "error",
+        "--template",
+        *[
+            str(_stack_paths(stacks_dir, deployment_manifest, stack_id)[0])
+            for stack_id in deployment_manifest.stack_ids
+        ],
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
@@ -116,7 +145,8 @@ def run_cfn_lint(stacks_dir: Path) -> tuple[list[str], list[str]]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stacks-dir", type=Path, default=Path(__file__).parent / "stacks")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
+    parser.add_argument("--stacks-dir", type=Path)
     parser.add_argument("--skip-cfn-lint", action="store_true")
     parser.add_argument("--require-cfn-lint", action="store_true")
     return parser
@@ -124,13 +154,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    errors = validate_repository(args.stacks_dir)
+    try:
+        manifest = load_manifest(args.manifest)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    errors = validate_repository(args.stacks_dir, manifest=manifest)
     warnings: list[str] = []
     if not args.skip_cfn_lint:
         if args.require_cfn_lint and shutil.which("cfn-lint") is None:
             errors.append("cfn-lint is required but is not installed")
         else:
-            lint_errors, lint_warnings = run_cfn_lint(args.stacks_dir)
+            lint_errors, lint_warnings = run_cfn_lint(args.stacks_dir, manifest=manifest)
             errors.extend(lint_errors)
             warnings.extend(lint_warnings)
     for warning in warnings:
@@ -139,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print(f"validated {len(STACK_ORDER)} independent CloudFormation stack contracts")
+    print(f"validated {len(manifest.stack_ids)} independent CloudFormation stack contracts")
     return 0
 
 

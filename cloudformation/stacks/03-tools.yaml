@@ -1,14 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: Read-only Lambda tools exposed through the AgentCore Gateway stack.
 
 Parameters:
   EnvironmentName:
     Type: String
-  ArtifactBucketName:
-    Type: String
-  LambdaPackageKey:
-    Type: String
-    Default: lambda/tool_handler.zip
   ToolsExecutionRoleArn:
     Type: String
   VectorDimension:
@@ -51,7 +47,7 @@ Mappings:
 
 Resources:
   SearchIncidentsFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-search-incidents
       Runtime: python3.12
@@ -59,9 +55,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, search-incidents, Timeout]
       MemorySize: 512
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: search_incidents
@@ -76,7 +70,7 @@ Resources:
           EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
 
   GetCustomerInvoicesFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-get-customer-invoices
       Runtime: python3.12
@@ -84,9 +78,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, get-customer-invoices, Timeout]
       MemorySize: 512
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: get_customer_invoices
@@ -101,7 +93,7 @@ Resources:
           EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
 
   GetApplicationLogsFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-get-application-logs
       Runtime: python3.12
@@ -109,9 +101,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, get-application-logs, Timeout]
       MemorySize: 512
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: get_application_logs
@@ -126,7 +116,7 @@ Resources:
           EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
 
   GetDeploymentsFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-get-deployments
       Runtime: python3.12
@@ -134,9 +124,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, get-deployments, Timeout]
       MemorySize: 512
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: get_deployments
@@ -151,7 +139,7 @@ Resources:
           EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
 
   GetCurrentInvoiceStateFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-get-current-invoice-state
       Runtime: python3.12
@@ -159,9 +147,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, get-current-invoice-state, Timeout]
       MemorySize: 512
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: get_current_invoice_state
@@ -176,7 +162,7 @@ Resources:
           EMBEDDING_MODEL_ID: !Ref EmbeddingModelId
 
   SearchEvidenceFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-search-evidence
       Runtime: python3.12
@@ -184,9 +170,7 @@ Resources:
       Timeout: !FindInMap [ToolSettings, search-evidence, Timeout]
       MemorySize: 1024
       Role: !Ref ToolsExecutionRoleArn
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref LambdaPackageKey
+      CodeUri: ../../lambda
       Environment:
         Variables:
           TOOL_NAME: search_evidence

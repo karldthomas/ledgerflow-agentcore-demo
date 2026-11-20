@@ -110,7 +110,7 @@ Resources:
     Type: AWS::Bedrock::Prompt
     Properties:
       Name: !Sub ledgerflow-${EnvironmentName}-planner
-      Description: Bounded read-only investigation planning prompt.
+      Description: Bounded read-only task-aware retrieval planning prompt.
       CustomerEncryptionKeyArn: !Ref KmsKeyArn
       DefaultVariant: default
       Variants:
@@ -128,11 +128,15 @@ Resources:
               System:
                 - Text: >-
                     You are the bounded planning stage of a read-only incident investigator.
-                    Return exactly one JSON object. You may refine search text and choose which
-                    read-only evidence categories to collect, but you cannot choose tenants,
-                    permissions, write actions, or arbitrary tools. Use only the fields requested.
-                    Prefer collecting invoices, application logs, and deployments for payment or
-                    customer-impact investigations.
+                    Return exactly one JSON object. Classify the request as exactly one of
+                    investigation, explanation, or verification. If requested_task_type is a
+                    supported non-auto value, preserve it. You may refine search text, but you
+                    cannot choose tenants, permissions, write actions, retrieval policy IDs, or
+                    arbitrary tools. The application selects the deterministic retrieval policy
+                    from task_type. Use only the fields requested. An investigation discovers
+                    causes broadly; an explanation favors authoritative runbooks and concise
+                    supporting evidence; verification favors current structured records and
+                    corroborating authoritative evidence.
               Messages:
                 - Role: user
                   Content:
@@ -145,7 +149,7 @@ Resources:
     Type: AWS::Bedrock::PromptVersion
     Properties:
       PromptArn: !Ref PlannerPrompt
-      Description: Initial immutable planner prompt version.
+      Description: Task-aware immutable planner prompt version.
       Tags:
         Environment: !Ref EnvironmentName
         Purpose: prompt-management
@@ -447,7 +451,7 @@ Resources:
     Properties:
       GatewayIdentifier: !Ref LedgerFlowGateway
       Name: Evidence
-      Description: Query S3 Vectors with native hybrid ranking and tenant filters.
+      Description: Query S3 Vectors with task-aware ranking and tenant filters.
       CredentialProviderConfigurations:
         - CredentialProviderType: GATEWAY_IAM_ROLE
       TargetConfiguration:
@@ -457,7 +461,7 @@ Resources:
             ToolSchema:
               InlinePayload:
                 - Name: search_evidence
-                  Description: Run hybrid BM25 plus vector search over authorized evidence.
+                  Description: Run a bounded task-selected search over authorized evidence.
                   InputSchema:
                     Type: object
                     Properties:
@@ -467,6 +471,12 @@ Resources:
                         Type: string
                       top_k:
                         Type: integer
+                      strategy:
+                        Type: string
+                      source_types:
+                        Type: array
+                        Items:
+                          Type: string
                     Required:
                       - query
                       - tenant_id

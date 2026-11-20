@@ -64,6 +64,7 @@
               <label>Customer ID<input id="customer-id" value="ACME-482" required /></label>
               <label>Incident ID <span class="optional">optional</span><input id="incident-id" value="INC-1042" placeholder="Let the agent find it" /></label>
               <label>Tenant<input id="tenant-id" value="tenant_acme" required /></label>
+              <label>Task type<select id="task-type"><option value="auto">Let the planner classify</option><option value="investigation">Investigation · discover causes</option><option value="explanation">Explanation · use authoritative guidance</option><option value="verification">Verification · check current records</option></select></label>
               <label id="workflow-id-wrap" class="hidden">Workflow ID <span class="optional">admin recovery test</span><input id="workflow-id" placeholder="Use the ID armed in Dev tools" /></label>
               <label>Investigation request<textarea id="request-text" rows="5">Investigate the duplicate invoice after the payment retry timeout.</textarea></label>
               <button class="primary-button" type="submit"><span>Run investigation</span><span>→</span></button>

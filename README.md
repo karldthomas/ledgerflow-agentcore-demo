@@ -12,10 +12,12 @@ demonstrates:
 
 - read-only AgentCore Gateway tools with tenant authorization;
 - S3 Vectors enhanced hybrid retrieval with Titan embeddings and reciprocal-rank fusion;
+- task-aware retrieval policies for investigation, explanation, and verification requests;
 - schema-driven evidence normalization with typed facts, relationships, and hypotheses;
 - evidence claims that are traceable to authorized source IDs;
 - AgentCore Memory with tenant namespaces and expiration;
 - versioned DynamoDB checkpoints, workflow leases, and idempotent report publication;
+- a pre-publication deterministic contract gate plus an independent Step Functions post-run audit;
 - Step Functions durable workflow execution; and
 - operator-visible reasoning summaries, execution logs, typed reports, and
   admin-only Dev tools for deterministic recovery exercises.
@@ -37,9 +39,10 @@ application logs and 16 related invoices so the compactor produces
 reference-only evidence under the default 8,000-token budget.
 
 The deployed AWS Runtime uses a bounded Bedrock Converse planner and report
-synthesizer with `amazon.nova-micro-v1:0`; the model can refine queries and
-choose which read-only evidence categories to collect, while Gateway, tenant
-authorization, checkpoints, and evidence validation remain application-owned.
+synthesizer with `amazon.nova-micro-v1:0`; the model can classify the task and
+refine queries, while the deterministic retrieval-policy registry chooses the
+bounded source scope and ranking strategy. Gateway, tenant authorization,
+checkpoints, and evidence validation remain application-owned.
 The model cannot execute financial writes or cite IDs outside the authorized
 evidence packet. The AWS path in this repository uses AgentCore
 Runtime/Gateway/Memory, DynamoDB, S3, S3 Vectors, Lambda, Step Functions,
@@ -87,23 +90,29 @@ ledgerflow/
   models.py             shared report contract
   planner.py            bounded Bedrock investigation planner
   prompting.py          active native Bedrock prompt-version resolver
+  retrieval_policies.py deterministic task-aware retrieval registry
   reasoning.py          Bedrock report synthesis with citation checks
   runtime_entry.py      AgentCore Runtime entrypoint
   runtime_server.py     HTTP server for Runtime invocations
 cloudformation/
+  deployment.yaml    manifest for stack order, dependencies, and lifecycle steps
+  manifest.py        validated manifest loader with derived JSON pairing
+  orchestrate.py     one-command lifecycle runner
   stacks/            matching YAML templates and JSON parameter mappings
   scripts/           deployment configuration and stack-validation helpers
-  deploy.py          explicit plan/change-set/execute orchestrator
+  deploy.py          dependency planner and context resolver
+  sam_deploy.py      single SAM build/deploy adapter for all eight stacks
   validate.py        no-AWS deployment-contract validator
   ingest.py          fixture-to-DynamoDB/S3/S3-Vectors loader
-  package_artifacts.py  Lambda artifact builder/uploader
-  package_web.py      Lambda-served console artifact builder
+  requirements.txt   pinned SDK dependency for the SAM-built custom resource
 lambda/
+  requirements.txt   pinned SDK dependency installed by SAM for Lambda code
+  __init__.py        Lambda package marker
   tool_handler.py    tenant-scoped read-only Gateway targets
   web_app.py         Cognito-protected console and investigation API
 frontend/            Lambda-served control-room UI
 Dockerfile           AgentCore Runtime container boundary
-deploy-all.sh        one-command build, artifact, ingestion, and deployment entry point
+deploy-all.sh        one-command build, SAM, ingestion, and deployment entry point
 LICENSE              MIT license
 tests/              context-compaction, AWS adapter, and CloudFormation contract tests
 ```
@@ -140,8 +149,11 @@ export AWS_REGION=us-east-1
 
 `AWS_SESSION_TOKEN` is also supported for temporary credentials. The script
 does not select or require an AWS profile. It builds the Linux/arm64 Runtime
-image, packages the Lambda and web artifacts, loads the deterministic fixture
-corpus, deploys all eight stacks, and prints the Cognito-protected console URL.
+image, submits all eight stacks through `sam deploy`, loads the deterministic
+fixture corpus, and prints the Cognito-protected console URL. SAM runs
+`sam build` for every stack; the four Lambda-bearing stacks additionally stage
+source and dependencies into SAM artifacts. Stack 00 bootstraps the scoped
+artifact bucket used by the later deployments.
 
 ## Deterministic recovery test
 
@@ -189,7 +201,7 @@ legacy `FailureInjectionEnabled` environment setting.
 flowchart TB
   subgraph deploy["Deployment and value exchange"]
     templates["Eight independent CloudFormation stacks<br/>00 security → 07 web app"]
-    deployer["cloudformation/deploy.py<br/>paired YAML + JSON configuration"]
+    deployer["cloudformation/sam_deploy.py<br/>paired YAML + JSON + SAM deploy"]
     context["deployment-context-<env>.json<br/>CF_OUT_* mappings"]
     templates --> deployer --> context
   end
@@ -257,8 +269,8 @@ POC has no financial-write tool and explicitly rejects attempts to add one.
 The deployed console has two views:
 
 - **Investigation** shows run status, checkpoint timeline hover/focus details,
-  safe reasoning summaries, execution results, evidence IDs, and the final
-  typed report.
+  safe reasoning summaries, execution results, evidence IDs, deterministic
+  audit results, and the final typed report.
 - **Prompt versions** is admin-only. It lists the planner, context-compaction,
   and report-synthesis
   Bedrock Prompt Management resources, shows the active immutable version,
@@ -280,14 +292,19 @@ The complete development deployment can be run from the repository root with:
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com ./deploy-all.sh --environment dev
 ```
 
-The script runs tests and contract validation, creates the ECR/artifact
-foundation, builds and pushes the digest-pinned Runtime image, packages the
-Lambda and web artifacts, ingests the fixture corpus, and deploys all eight
-independent stacks. Install the one deployment-host dependency first if needed:
+The script runs tests and contract validation, creates the ECR/SAM staging
+foundation through `sam deploy`, builds and pushes the digest-pinned Runtime
+image, submits all eight stacks through `sam deploy`, ingests the fixture
+corpus, and prints the console URL. SAM runs `sam build` only for the four
+stacks that contain Lambda functions. Install the deployment-host dependencies
+first if needed:
 
 ```bash
 python3 -m pip install --user boto3
 ```
+
+Install the AWS SAM CLI from AWS's documented distribution for your OS; Docker
+is also required for the AgentCore Runtime image build.
 
 The deployment uses the standard ambient AWS environment variables, including
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and

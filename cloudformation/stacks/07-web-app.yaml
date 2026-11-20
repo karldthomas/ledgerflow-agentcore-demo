@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: Cognito-protected Lambda-served LedgerFlow investigation console.
 
 Parameters:
@@ -6,11 +7,6 @@ Parameters:
     Type: String
   KmsKeyArn:
     Type: String
-  ArtifactBucketName:
-    Type: String
-  WebArtifactKey:
-    Type: String
-    Default: lambda/web_app.zip
   StateMachineArn:
     Type: String
   WorkflowCheckpointsTableName:
@@ -175,17 +171,15 @@ Resources:
                 Resource: !GetAtt LedgerFlowUserPool.Arn
 
   WebAppFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-web
       Runtime: python3.12
-      Handler: web_app.handler
+      Handler: lambda.web_app.handler
       Role: !GetAtt WebAppRole.Arn
       Timeout: 30
       MemorySize: 1024
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref WebArtifactKey
+      CodeUri: ../../
       Environment:
         Variables:
           USER_POOL_ID: !Ref LedgerFlowUserPool
@@ -402,17 +396,15 @@ Resources:
       SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebApi}/*
 
   BootstrapAdminFunction:
-    Type: AWS::Lambda::Function
+    Type: AWS::Serverless::Function
     Condition: HasBootstrapAdmin
     Properties:
       FunctionName: !Sub ledgerflow-${EnvironmentName}-bootstrap-admin
       Runtime: python3.12
-      Handler: bootstrap_admin.handler
+      Handler: lambda.bootstrap_admin.handler
       Role: !GetAtt BootstrapAdminRole.Arn
       Timeout: 30
-      Code:
-        S3Bucket: !Ref ArtifactBucketName
-        S3Key: !Ref WebArtifactKey
+      CodeUri: ../../
 
   BootstrapAdminRole:
     Type: AWS::IAM::Role

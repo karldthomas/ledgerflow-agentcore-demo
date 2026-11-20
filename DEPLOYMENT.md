@@ -1,7 +1,7 @@
 # LedgerFlow Deployment Plan
 
 Status: implemented and deployed in the development environment; AWS changes
-remain explicit and opt-in through change sets.
+are explicit and submitted through AWS SAM's CloudFormation change-set flow.
 
 This document defines the deployment process for the LedgerFlow AgentCore POC.
 It is intentionally more specific than `PLAN.md`: it defines stack boundaries,
@@ -48,16 +48,22 @@ variables for later deployments.
 Developer or CI job
         |
         v
-cloudformation/deploy.py
+deploy-all.sh
         |
-        +--> load stack YAML
-        +--> load matching stack JSON
-        +--> resolve ${ENV_VAR} and ${CF_OUT_*}
-        +--> validate parameters
-        +--> create/execute CloudFormation change set
-        +--> wait for completion
-        +--> describe-stacks
-        +--> update deployment context
+        +--> cloudformation/orchestrate.py
+                  |
+                  +--> load deployment.yaml
+                  +--> run named lifecycle steps
+                  +--> cloudformation/sam_deploy.py
+                              |
+                              +--> derive matching stack JSON
+                              +--> resolve ${ENV_VAR} and ${CF_OUT_*}
+                              +--> validate parameters
+                              +--> sam build (every stack)
+                              +--> sam deploy (every stack)
+                              +--> wait for SAM's deployment result
+                              +--> describe-stacks
+                              +--> update deployment context
         |
         v
 Independent CloudFormation stacks
@@ -73,12 +79,78 @@ Independent CloudFormation stacks
 ```
 
 The stacks are independent CloudFormation stacks. The dependency relationship
-is implemented by `deploy.py`, not by CloudFormation intrinsic references.
+is implemented by the context resolver used by `sam_deploy.py`, not by
+CloudFormation intrinsic references. `deploy.py --plan` remains the no-write
+dependency preview; `sam_deploy.py` is the write path for every stack.
+
+### 2.1 Deployment manifest and lifecycle steps
+
+The reusable deployment contract is a manifest such as
+`cloudformation/deployment.yaml`. A shared Python loader
+(`cloudformation/manifest.py`) parses it for both `deploy.py --plan` and
+`sam_deploy.py`; `cloudformation/orchestrate.py` executes the named lifecycle
+steps, and `deploy-all.sh` is only a shell entry point. No shell code parses
+YAML or duplicates stack order.
+
+The manifest owns stack identity, dependency order, naming, and named lifecycle
+steps:
+
+```yaml
+version: 1
+name: ledgerflow
+stack_name_pattern: "{name}-{environment}-{id}"
+
+stacks:
+  - id: 00-security
+    template: stacks/00-security.yaml
+    depends_on: []
+  - id: 01-storage
+    template: stacks/01-storage.yaml
+    depends_on: [00-security]
+
+steps:
+  - id: build-runtime-image
+    handler: build_runtime_image
+    after: [00-security]
+    before: [01-storage]
+  - id: ingest-fixtures
+    handler: ingest_fixtures
+    after: [02-s3-vectors]
+    before: [03-tools]
+```
+
+The JSON configuration path is never repeated in the manifest. The loader
+derives it from the template path with the same basename:
+
+```text
+stacks/01-storage.yaml -> stacks/01-storage.json
+```
+
+The loader validates the manifest version, unique stack IDs, template/config
+pairs, dependency references, cycles, and lifecycle-step placement before any
+AWS call. The orchestrator validates each handler against its allow-list before
+running it. The loader returns a stable topological order and the transitive
+predecessors needed to hydrate `CF_OUT_*` values when a deployment resumes.
+
+Lifecycle handlers are an allow-listed Python registry, not arbitrary shell
+commands from the manifest. The initial handlers cover the local test suite,
+contract validation, AWS identity verification, Runtime image build/push, and
+deterministic fixture ingestion. This keeps the deployment reusable without
+allowing a data file to execute unreviewed commands.
+
+`sam build` still runs for every stack. For a stack containing
+`AWS::Serverless::Function`, the SAM template and its resource metadata control
+the Lambda build. For an infrastructure-only stack, the build produces the
+translated deployment template but no Lambda artifact. `sam deploy` then owns
+the CloudFormation change set and progress reporting for both kinds of stack.
 
 ## 3. Repository layout
 
 ```text
 cloudformation/
+  deployment.yaml
+  manifest.py
+  orchestrate.py
   stacks/
     00-security.yaml
     00-security.json
@@ -97,9 +169,10 @@ cloudformation/
     07-web-app.yaml
     07-web-app.json
   deploy.py
+  sam_deploy.py
   validate.py
   ingest.py
-  package_artifacts.py
+  requirements.txt
   scripts/
     replace_environment_vars.py
     config_to_parameters.py
@@ -115,7 +188,11 @@ stacks/02-s3-vectors.yaml
 stacks/02-s3-vectors.json
 ```
 
-`deploy.py --stack 02-s3-vectors` locates both files automatically.
+`deploy.py --stack 02-s3-vectors --plan` locates both files automatically from
+the manifest.
+`sam_deploy.py` is the single deployment adapter: it stages only the required
+Lambda source, runs `sam build` for every stack, and then submits every stack
+with `sam deploy`. No manually created Lambda ZIP is required.
 
 Run the repository-only deployment validation with:
 
@@ -140,7 +217,7 @@ Outputs:
     Value: !GetAtt LedgerFlowKey.Arn
 
   ArtifactBucketName:
-    Description: Bucket for packaged Lambda code and deployment artifacts
+    Description: SAM staging bucket and deployment artifacts
     Value: !Ref ArtifactBucket
 ```
 
@@ -222,22 +299,33 @@ For a placeholder such as `${NAME}`, the resolver uses this order:
 
 Unresolved placeholders must fail before CloudFormation is called.
 
-## 5. Python deployment orchestrator
+## 5. Context-aware deployment adapter
 
-`deploy.py` is responsible for orchestration only. It does not contain business
-logic or create AWS resources directly outside CloudFormation APIs.
+`sam_deploy.py` owns stack writes and deployment feedback. It uses the
+resolution, validation, hydration, and output-context helpers in `deploy.py`; it
+does not contain business logic or create AWS resources directly outside the
+SAM/CloudFormation deployment flow. `deploy.py --plan` is the review-only
+dependency and parameter preview.
 
 ### 5.1 Inputs
 
 ```text
+deploy.py --plan:
+
 --environment dev
 --region us-east-1
---stack 00-security              optional single-stack deployment
+--stack 00-security              optional single-stack preview
 --from 00-security               start from a stack and continue
 --plan                           resolve and validate without deploying
---change-set                     create one selected stack's change set without executing it
---execute                        create and execute change sets in dependency order
---execute-change-set ID=NAME     execute one exact, previously reviewed change set
+--set KEY=VALUE                  explicit parameter override
+
+sam_deploy.py:
+
+--environment dev
+--region us-east-1
+--stack STACK_ID                 deploy one stack through SAM
+--s3-bucket BUCKET               SAM staging bucket after Stack 00 exists
+--resolve-s3                     let SAM create a managed staging bucket
 --set KEY=VALUE                  explicit parameter override
 ```
 
@@ -253,28 +341,30 @@ MODEL_ID
 
 ### 5.2 Deployment algorithm
 
-For each stack in order:
+The manifest-driven runner executes the following sequence:
 
-1. calculate the CloudFormation stack name;
-2. load `<stack>.yaml`;
-3. load `<stack>.json`;
-4. resolve environment and `CF_OUT_*` placeholders;
-5. validate that every resolved parameter exists in the template;
-6. validate that required template parameters have values;
-7. validate the contract; run repository-wide `cfn-lint` before the deployment;
-8. create a CloudFormation change set;
-9. execute the change set only in `--execute` mode, or execute the exact reviewed
-   change set with `--execute-change-set STACK_ID=CHANGE_SET`;
-10. wait for the stack operation to complete;
-11. fail immediately if the stack reaches a rollback or failure state;
-12. call `describe-stacks` after a successful execution;
-13. map outputs to `CF_OUT_*` context values;
-14. persist the non-secret deployment context;
-15. continue to the next stack.
+1. load and validate the manifest, including derived `<template>.json` paths;
+2. run lifecycle steps positioned before the first stack;
+3. calculate the CloudFormation stack name;
+4. load `<stack>.yaml` and its derived `<stack>.json`;
+5. resolve environment and `CF_OUT_*` placeholders;
+6. validate that every resolved parameter exists in the template;
+7. validate that required template parameters have values;
+8. validate the contract; run repository-wide `cfn-lint` before the deployment;
+9. stage Lambda source when needed and run `sam build` for every stack;
+10. invoke `sam deploy`, which creates and executes the CloudFormation change
+   set and reports deployment progress;
+11. run lifecycle steps positioned after that stack;
+12. fail immediately if the stack reaches a rollback or failure state;
+13. call `describe-stacks` after a successful execution;
+14. map outputs to `CF_OUT_*` context values;
+15. persist the non-secret deployment context;
+16. continue to the next stack.
 
-For `--stack` or `--from`, the deployer hydrates predecessor outputs directly
-from `describe-stacks` when AWS mode is selected. The local context file is a
-cache and recovery aid, not a CloudFormation import mechanism.
+For `sam_deploy.py --stack`, the adapter hydrates predecessor outputs directly
+from `describe-stacks`. For `deploy.py --from`, the same manifest order is used
+for a no-write dependency preview. The local context file is a cache and
+recovery aid, not a CloudFormation import mechanism.
 
 ### 5.3 Stack naming
 
@@ -299,7 +389,7 @@ instead of creating replacement stacks.
 The deployment must be safe to run repeatedly:
 
 - use deterministic stack names;
-- use change sets or `deploy` update behavior;
+- use SAM's managed change-set/update behavior;
 - do not create random physical names unless replacement is intended;
 - use immutable ECR image digests;
 - use stable S3 Vectors bucket and index names;
@@ -362,7 +452,9 @@ After Stack 00 succeeds:
 3. push the image;
 4. resolve the immutable image digest;
 5. set `RUNTIME_IMAGE_URI` to the digest-qualified URI;
-6. upload packaged Lambda artifacts to the artifact bucket.
+6. let `sam_deploy.py` submit the remaining stacks through `sam deploy`; SAM
+   builds every template and uploads Lambda artifacts to the Stack 00 artifact
+   bucket when a function-bearing stack is reached.
 
 CloudFormation creates the ECR repository. CI or the local deployment process
 creates the image artifact. This is the unavoidable artifact boundary; the
@@ -503,8 +595,6 @@ Creates:
 Inputs:
 
 ```text
-ArtifactBucketName = ${CF_OUT_ArtifactBucketName}
-LambdaPackageKey = ${LAMBDA_PACKAGE_KEY}
 ToolsExecutionRoleArn = ${CF_OUT_ToolsExecutionRoleArn}
 IncidentsTableName = ${CF_OUT_IncidentsTableName}
 InvoicesTableName = ${CF_OUT_InvoicesTableName}
@@ -693,7 +783,6 @@ Inputs:
 
 ```text
 KmsKeyArn = ${CF_OUT_KmsKeyArn}
-ArtifactBucketName = ${CF_OUT_ArtifactBucketName}
 StateMachineArn = ${CF_OUT_StateMachineArn}
 WorkflowCheckpointsTableName = ${CF_OUT_WorkflowCheckpointsTableName}
 WorkflowEventsTableName = ${CF_OUT_WorkflowEventsTableName}
@@ -780,19 +869,25 @@ Before deploying:
 ### One-command development deployment
 
 For the normal development path, the repository now provides a single
-orchestrator that runs the repository tests and CloudFormation validation, deploys
-Stack 00, packages and uploads the Lambda/web artifacts, builds and pushes the
-ARM64 Runtime image, ingests the deterministic fixtures, and deploys Stacks
-01–07 in dependency order:
+orchestrator that runs the repository tests and CloudFormation validation,
+submits Stack 00 through `sam deploy`, builds and pushes the ARM64 Runtime
+image, ingests the deterministic fixtures, and submits Stacks 01–07 through
+the same `sam deploy` path in dependency order:
 
 ```bash
 python3 -m pip install --user boto3
 ./deploy-all.sh
 ```
 
+The deployment host must also have the AWS SAM CLI and Docker installed. The
+script uses ambient AWS environment variables and does not select an AWS
+profile. Stack 00 is small enough for SAM to send directly to CloudFormation;
+once it creates the scoped artifact bucket, later stacks pass that bucket to
+SAM for template and Lambda artifact uploads.
+
 Before running it, provide standard ambient AWS credentials such as
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
-`AWS_REGION`. The script does not select or override an AWS profile.
+`AWS_REGION`.
 
 Set `BOOTSTRAP_ADMIN_EMAIL` on the first deployment if the Cognito bootstrap
 custom resource should create or invite the initial administrator:
@@ -802,43 +897,39 @@ BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
 ./deploy-all.sh
 ```
 
-The script records a digest-qualified Runtime image and uses a release-specific
-web artifact key, so rerunning it updates changed code instead of reusing an
-unchanged S3 key. If a run stops after a successful stack, rerun the same
-command; the stable stack names and deployment context make the operation
-resumable. `--skip-ingest` is available when the fixture data is already
-loaded. `--skip-tests` and `--skip-validation` are available for controlled
-follow-up deployments.
+The script records a digest-qualified Runtime image. For Stacks 02, 03, 05,
+and 07, it stages the required source files, runs `sam build`, and uses
+`sam deploy` with the Stack 00 artifact bucket as SAM's staging bucket. No
+Lambda ZIP is manually created or uploaded. If a run stops after a successful
+stack, rerun the same command; the stable stack names and deployment context
+make the operation resumable. `--skip-ingest` is available when the fixture
+data is already loaded. `--skip-tests` and `--skip-validation` are available
+for controlled follow-up deployments.
 
-This path executes change sets immediately. Use the manual procedure below when
-each change set must be reviewed before execution.
+This path executes CloudFormation changes immediately through SAM's managed
+change-set flow for all eight stacks. Use the manual procedure below when a
+single stack should be deployed independently.
 
 ### Step 1 — Security/bootstrap
 
 ```bash
-python cloudformation/deploy.py \
+python3 cloudformation/sam_deploy.py \
   --environment dev \
-  --stack 00-security \
-  --change-set
+  --region "$AWS_REGION" \
+  --context-file cloudformation/build/deployment-context-dev.json \
+  --stack 00-security
 ```
 
-The command returns the exact change-set ID. Review it, then execute that same
-change set:
+This uses `sam deploy` directly against the small bootstrap template; no
+staging bucket exists yet. Confirm that the deployment context contains the
+KMS, artifact bucket, ECR repository, and role outputs before continuing.
 
-```bash
-python cloudformation/deploy.py \
-  --environment dev \
-  --execute-change-set 00-security=<CHANGE_SET_ID>
-```
+### Step 2 — Build and publish the Runtime image and SAM artifacts
 
-For a non-review development apply, `--execute` creates and executes the change
-set in one operation. Confirm that the deployment context contains the KMS,
-artifact bucket, ECR repository, and role outputs.
-
-### Step 2 — Build and publish artifacts
-
-Build and push the Runtime image to the ECR URI from `CF_OUT_RuntimeRepositoryUri`.
-Package the Lambda functions and upload them to the artifact bucket.
+Build and push the Runtime image to the ECR URI from
+`CF_OUT_RuntimeRepositoryUri`. The all-in-one script also uses the Stack 00
+artifact bucket as SAM's staging bucket; SAM performs Lambda dependency
+installation, build, packaging, and upload.
 
 Set:
 
@@ -846,24 +937,33 @@ Set:
 RUNTIME_IMAGE_URI=<digest-qualified ECR URI>
 ```
 
-The package helper writes `cloudformation/build/tool_handler.zip` and, with
-`--upload`, uploads it to `s3://<CF_OUT_ArtifactBucketName>/lambda/tool_handler.zip`:
+For an independent Lambda-bearing stack deployment, use the SAM adapter after
+its predecessor outputs are present in the deployment context:
 
 ```bash
-python3 cloudformation/package_artifacts.py \
-  --bucket <CF_OUT_ArtifactBucketName> \
+python3 cloudformation/sam_deploy.py \
+  --environment dev \
   --region "$AWS_REGION" \
-  --vendor-dependencies \
-  --upload
+  --context-file cloudformation/build/deployment-context-dev.json \
+  --stack 03-tools \
+  --s3-bucket <CF_OUT_ArtifactBucketName> \
+  --s3-prefix ledgerflow-sam-manual
 ```
+
+The adapter stages only the handler source needed by the selected stack, then
+executes `sam build` and `sam deploy`. `deploy-all.sh` invokes the same adapter
+for every stack; only Stacks 02, 03, 05, and 07 need the build phase.
 
 ### Step 3 — Deploy storage
 
 ```bash
-python cloudformation/deploy.py \
+python3 cloudformation/sam_deploy.py \
   --environment dev \
+  --region "$AWS_REGION" \
+  --context-file cloudformation/build/deployment-context-dev.json \
   --stack 01-storage \
-  --change-set
+  --s3-bucket <CF_OUT_ArtifactBucketName> \
+  --s3-prefix ledgerflow-sam-manual
 ```
 
 Confirm that all table names and bucket names are added to the deployment
@@ -871,10 +971,16 @@ context.
 
 ### Step 4 — Deploy and ingest S3 Vectors
 
-Deploy Stack 02, then run the ingestion job:
+Deploy Stack 02 with SAM, then run the ingestion job:
 
 ```bash
-python3 cloudformation/deploy.py --environment dev --stack 02-s3-vectors --execute
+python3 cloudformation/sam_deploy.py \
+  --environment dev \
+  --region "$AWS_REGION" \
+  --context-file cloudformation/build/deployment-context-dev.json \
+  --stack 02-s3-vectors \
+  --s3-bucket <CF_OUT_ArtifactBucketName> \
+  --s3-prefix ledgerflow-sam-manual
 python3 cloudformation/ingest.py \
   --context-file cloudformation/build/deployment-context-dev.json \
   --region "$AWS_REGION" \
@@ -898,7 +1004,7 @@ deployments:       43
 
 ### Step 5 — Deploy tools
 
-Deploy Stack 03. Invoke each tool directly with an authorized test request and
+Deploy Stack 03 with SAM. Invoke each tool directly with an authorized test request and
 confirm:
 
 - tenant filtering works;
@@ -917,14 +1023,19 @@ Run the policy regression suite. Change the configuration to `ENFORCE` only
 after expected allow and deny decisions are verified:
 
 ```bash
-python3 cloudformation/deploy.py --environment dev --stack 04-agentcore --execute \
+python3 cloudformation/sam_deploy.py --environment dev --region "$AWS_REGION" \
+  --context-file cloudformation/build/deployment-context-dev.json \
+  --stack 04-agentcore \
+  --s3-bucket <CF_OUT_ArtifactBucketName> \
+  --s3-prefix ledgerflow-sam-manual \
   --set GatewayPolicyMode=ENFORCE \
   --set PolicyEnforcementMode=ACTIVE
 ```
 
 ### Step 7 — Deploy workflow and observability
 
-Deploy Stacks 05 and 06. Start a one-incident workflow and verify:
+Deploy Stack 05 and Stack 06 through `sam_deploy.py`. Start a one-incident
+workflow and verify:
 
 - checkpoints are written;
 - the report is saved;
@@ -994,9 +1105,9 @@ continues normal investigations without injected failure.
 
 ### Step 8 — Deploy the web console
 
-Package and upload `cloudformation/build/web_app.zip`, then deploy Stack 07.
-Provide `BootstrapAdminEmail` for the first administrator invite. Open the
-`WebApiUrl` output, sign in through Cognito, and verify that the console shows:
+Deploy Stack 07 with SAM. Provide `BootstrapAdminEmail` for the first
+administrator invite. Open the `WebApiUrl` output, sign in through Cognito, and
+verify that the console shows:
 
 - the investigation form;
 - live checkpoint and tool-call events;
@@ -1067,11 +1178,11 @@ For a normal application update:
 2. build a new Runtime image;
 3. push the image by immutable digest;
 4. run `deploy.py --plan`;
-5. create change sets for the affected stacks;
-6. inspect IAM, data, and replacement changes;
-7. deploy to the development environment;
-8. run the smoke and evaluation suites;
-9. promote the same template and image digest after review.
+5. run `sam_deploy.py` for the affected stacks;
+6. inspect SAM's CloudFormation change-set and progress output for IAM, data,
+   and replacement changes;
+7. run the smoke and evaluation suites in development;
+8. promote the same template and image digest after review.
 
 Because stack values are passed by deployment context, changing an output name
 requires updating the downstream JSON files and deployment tests, but does not
@@ -1104,17 +1215,11 @@ fix the index or ingestion configuration, and rerun the data validation job.
 
 ### Partial deployment recovery
 
-The deployer supports:
-
-```bash
-python cloudformation/deploy.py \
-  --environment dev \
-  --from 03-tools
-```
-
-It rebuilds the context from all prior stack outputs before continuing, so a
-missing local context file does not require CloudFormation imports or manual
-copying of ARNs.
+Rerun `./deploy-all.sh --skip-ingest` after a partial deployment. Stable stack
+names and the deployment context make the command resumable. For one stack,
+invoke `sam_deploy.py` directly; it hydrates all prior stack outputs before
+running SAM, so a missing context cache does not require CloudFormation imports
+or manual copying of ARNs. Use `deploy.py --from` only for a dependency preview.
 
 ## 13. Destruction procedure
 

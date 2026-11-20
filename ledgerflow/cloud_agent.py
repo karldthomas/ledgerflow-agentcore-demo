@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .audit import audit_investigation
 from .context_compaction import (
     BedrockContextSummarizer,
     CompactedContext,
@@ -26,6 +28,7 @@ from .gateway import AgentCoreGatewayClient
 from .models import IncidentReport
 from .planner import BedrockInvestigationPlanner, InvestigationPlan
 from .reasoning import BedrockReportReasoner, ModelReasoningError
+from .retrieval_policies import RetrievalPolicy, classify_task, policy_for
 
 
 WORKFLOW_STATE_SCHEMA_VERSION = "ledgerflow.workflow.v1"
@@ -39,6 +42,15 @@ class WorkflowInProgressError(RuntimeError):
 
 class DeterministicFailure(RuntimeError):
     """Raised by the opt-in one-shot failure injector after a durable checkpoint."""
+
+
+class DeterministicAuditFailure(RuntimeError):
+    """Raised when the pre-publication investigation contract does not pass."""
+
+    def __init__(self, audit: dict[str, Any]):
+        self.audit = audit
+        failed_checks = ", ".join(str(value) for value in audit.get("failed_checks", [])) or "unknown check"
+        super().__init__(f"deterministic audit failed: {failed_checks}")
 
 
 class CloudInvestigationHandler:
@@ -484,6 +496,7 @@ class CloudInvestigationHandler:
             "memory_lookup",
             "context_compaction",
             "report_synthesis",
+            "pre_publish_audit",
             "completed",
         }
         if value not in valid_steps:
@@ -626,16 +639,44 @@ class CloudInvestigationHandler:
     @staticmethod
     def _default_plan(payload: dict[str, Any]) -> InvestigationPlan:
         request = str(payload.get("request") or "").strip()
+        task_type = classify_task(request, payload.get("task_type"))
+        policy = policy_for(task_type)
         return InvestigationPlan(
             goal="Investigate the reported customer incident.",
             incident_query=str(payload.get("incident_id") or payload.get("customer_id") or ""),
             evidence_query=request or "incident evidence",
             deployment_version=None,
-            include_invoices=True,
-            include_logs=True,
-            include_deployments=True,
+            include_invoices=policy.include_invoices,
+            include_logs=policy.include_logs,
+            include_deployments=policy.include_deployments,
             rationale="Use the standard read-only investigation path.",
+            task_type=task_type,
+            retrieval_policy_id=policy.policy_id,
         )
+
+    def _select_retrieval_policy(self, plan: InvestigationPlan) -> tuple[InvestigationPlan, RetrievalPolicy]:
+        """Apply the fixed source recipe after model planning."""
+
+        policy = policy_for(plan.task_type)
+        normalized = replace(
+            plan,
+            task_type=policy.task_type,
+            retrieval_policy_id=policy.policy_id,
+            include_invoices=policy.include_invoices,
+            include_logs=policy.include_logs,
+            include_deployments=policy.include_deployments,
+        )
+        self._emit(
+            "retrieval_policy",
+            "planning",
+            "selected",
+            {
+                "task_type": policy.task_type,
+                "policy_id": policy.policy_id,
+                "policy": policy.to_dict(),
+            },
+        )
+        return normalized, policy
 
     def _plan(self, payload: dict[str, Any]) -> InvestigationPlan:
         if self.planner is None:
@@ -646,7 +687,7 @@ class CloudInvestigationHandler:
                 "skipped",
                 {"reason": "model_reasoning_disabled", "plan": plan.to_dict(), "prompt_redacted": True},
             )
-            return plan
+            return self._select_retrieval_policy(plan)[0]
         try:
             self._emit("llm_plan", "planning", "started", {"model_id": self.planner.model_id, "request": payload.get("request", "")}, visibility="admin")
             self._emit(
@@ -656,6 +697,7 @@ class CloudInvestigationHandler:
                 {"model_id": self.planner.model_id, "prompt_redacted": True},
             )
             plan = self.planner.plan(payload)
+            plan, _policy = self._select_retrieval_policy(plan)
             self._emit("llm_plan", "planning", "completed", {"model_id": self.planner.model_id, "plan": plan.to_dict()}, visibility="admin")
             return plan
         except Exception as exc:
@@ -667,7 +709,7 @@ class CloudInvestigationHandler:
                 "degraded",
                 {"reason": "model_planning_unavailable", "fallback_used": True, "plan": plan.to_dict(), "prompt_redacted": True},
             )
-            return plan
+            return self._select_retrieval_policy(plan)[0]
 
     def _compact_context(
         self,
@@ -894,6 +936,7 @@ class CloudInvestigationHandler:
                     completed_steps=completed_steps,
                     failure_after_step=failure_after_step,
                 )
+            policy = policy_for(plan.task_type)
 
             if "incident_lookup" in completed_steps and isinstance(state.get("incident"), dict):
                 incident = state["incident"]
@@ -931,7 +974,7 @@ class CloudInvestigationHandler:
             if "log_lookup" in completed_steps and isinstance(state.get("logs"), list):
                 logs = state["logs"]
             else:
-                log_limit = getattr(self, "evidence_log_limit", 500)
+                log_limit = min(getattr(self, "evidence_log_limit", 500), policy.log_limit)
                 logs = self._call(
                     "ApplicationLogs",
                     "get_application_logs",
@@ -972,7 +1015,9 @@ class CloudInvestigationHandler:
                     "search_evidence",
                     tenant_id,
                     query=plan.evidence_query,
-                    top_k=6,
+                    top_k=policy.top_k,
+                    strategy=policy.strategy,
+                    source_types=list(policy.vector_source_types),
                 )
                 state["vector_items"] = vector_items
                 self._save_stage(
@@ -987,15 +1032,21 @@ class CloudInvestigationHandler:
             if "memory_lookup" in completed_steps and isinstance(state.get("memories"), list):
                 memories = state["memories"]
             else:
-                memories = self._memory_records(tenant_id, "payment-retry-handler", "payment retry idempotency policy")
+                memories = self._memory_records(
+                    tenant_id,
+                    "payment-retry-handler",
+                    policy.memory_query,
+                ) if policy.include_memory else []
                 self._emit(
                     "memory",
                     "memory_lookup",
-                    "completed",
+                    "completed" if policy.include_memory else "skipped",
                     {
                         "result_count": len(memories),
                         "result_preview": self._result_preview("memory_lookup", memories),
                         "preview_truncated": len(memories) > 4,
+                        "policy_id": policy.policy_id,
+                        "reason": "policy_excludes_memory" if not policy.include_memory else None,
                     },
                 )
                 state["memories"] = memories
@@ -1008,11 +1059,12 @@ class CloudInvestigationHandler:
                     failure_after_step=failure_after_step,
                 )
 
+            packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
             if "report_synthesis" in completed_steps and isinstance(state.get("report"), dict):
                 report = IncidentReport(**state["report"])
             else:
-                report = self._build_report(incident, invoices, logs, deployments, vector_items, memories, tenant_id)
-                packet = self._evidence_packet(incident, invoices, logs, deployments, vector_items)
+                report = self._build_report(incident, invoices, logs, deployments, vector_items, memories, tenant_id, plan.task_type)
+                state["required_evidence_ids"] = list(report.evidence_ids)
                 context, context_error = self._compact_context(
                     report=report,
                     evidence=packet,
@@ -1075,6 +1127,49 @@ class CloudInvestigationHandler:
                     completed_steps=completed_steps,
                     failure_after_step=failure_after_step,
                 )
+
+            stored_audit = state.get("pre_publish_audit")
+            if "pre_publish_audit" in completed_steps and isinstance(stored_audit, dict) and stored_audit.get("passed") is True:
+                audit = stored_audit
+            else:
+                audit = audit_investigation(
+                    workflow_id=workflow_id,
+                    tenant_id=tenant_id,
+                    customer_id=customer_id,
+                    plan=plan.to_dict(),
+                    report=report.to_dict(),
+                    evidence=packet,
+                    memories=memories,
+                    required_evidence_ids=state.get("required_evidence_ids", report.evidence_ids),
+                    mode="pre_publish",
+                )
+                state["pre_publish_audit"] = audit
+                self._emit(
+                    "deterministic_audit",
+                    "pre_publish_audit",
+                    "completed" if audit["passed"] else "failed",
+                    audit,
+                )
+                self._save_stage(
+                    workflow_id=workflow_id,
+                    customer_id=customer_id,
+                    step="pre_publish_audit",
+                    state=state,
+                    completed_steps=completed_steps,
+                    failure_after_step=failure_after_step,
+                )
+            if not audit.get("passed"):
+                self._emit(
+                    "workflow",
+                    "investigation",
+                    "failed",
+                    {
+                        "reason": "deterministic_gate_failed",
+                        "failed_checks": audit.get("failed_checks", []),
+                        "audit_schema_version": audit.get("schema_version"),
+                    },
+                )
+                raise DeterministicAuditFailure(audit)
 
             report = self._publish_idempotently(workflow_id, report)
             state["report"] = report.to_dict()
@@ -1174,6 +1269,7 @@ class CloudInvestigationHandler:
         vectors: list[dict[str, Any]],
         memories: list[dict[str, Any]],
         tenant_id: str,
+        task_type: str,
     ) -> IncidentReport:
         return build_evidence_report(
             incident=incident,
@@ -1183,5 +1279,5 @@ class CloudInvestigationHandler:
             vectors=vectors,
             memories=memories,
             tenant_id=tenant_id,
-            task_type="investigation",
+            task_type=task_type,
         )

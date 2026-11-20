@@ -271,6 +271,9 @@ Resources:
                   - dynamodb:UpdateItem
                 Resource: '*'
               - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:ledgerflow-${EnvironmentName}-workflow-audit
+              - Effect: Allow
                 Action:
                   - kms:Decrypt
                   - kms:DescribeKey

@@ -1,0 +1,48 @@
+version: 1
+name: ledgerflow
+stack_name_pattern: "{name}-{environment}-{id}"
+
+stacks:
+  - id: 00-security
+    template: stacks/00-security.yaml
+    depends_on: []
+  - id: 01-storage
+    template: stacks/01-storage.yaml
+    depends_on: [00-security]
+  - id: 02-s3-vectors
+    template: stacks/02-s3-vectors.yaml
+    depends_on: [00-security]
+  - id: 03-tools
+    template: stacks/03-tools.yaml
+    depends_on: [01-storage, 02-s3-vectors]
+  - id: 04-agentcore
+    template: stacks/04-agentcore.yaml
+    depends_on: [00-security, 01-storage, 02-s3-vectors, 03-tools]
+  - id: 05-workflow
+    template: stacks/05-workflow.yaml
+    depends_on: [00-security, 01-storage, 04-agentcore]
+  - id: 06-observability
+    template: stacks/06-observability.yaml
+    depends_on: [01-storage, 04-agentcore, 05-workflow]
+  - id: 07-web-app
+    template: stacks/07-web-app.yaml
+    depends_on: [01-storage, 04-agentcore, 05-workflow, 06-observability]
+
+steps:
+  - id: run-tests
+    handler: run_tests
+    before: [00-security]
+  - id: validate-contracts
+    handler: validate_contracts
+    before: [00-security]
+  - id: check-aws-identity
+    handler: check_aws_identity
+    before: [00-security]
+  - id: build-runtime-image
+    handler: build_runtime_image
+    after: [00-security]
+    before: [01-storage]
+  - id: ingest-fixtures
+    handler: ingest_fixtures
+    after: [02-s3-vectors]
+    before: [03-tools]

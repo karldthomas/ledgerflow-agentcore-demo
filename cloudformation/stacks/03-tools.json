@@ -1,9 +1,7 @@
 {
-  "Description": "Read-only Lambda tool parameters. Package the artifact before deploying this stack.",
+  "Description": "Read-only Lambda tool parameters. AWS SAM builds and uploads the functions during deployment.",
   "Configuration": [
     {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
-    {"Key": "ArtifactBucketName", "Value": "${CF_OUT_ArtifactBucketName}"},
-    {"Key": "LambdaPackageKey", "Value": "${LAMBDA_PACKAGE_KEY}", "Default": "lambda/tool_handler.zip"},
     {"Key": "ToolsExecutionRoleArn", "Value": "${CF_OUT_ToolsExecutionRoleArn}"},
     {"Key": "VectorDimension", "Value": "${VECTOR_DIMENSION}", "Default": "1024"},
     {"Key": "EmbeddingModelId", "Value": "${EMBEDDING_MODEL_ID}", "Default": "amazon.titan-embed-text-v2:0"},

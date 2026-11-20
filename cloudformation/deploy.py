@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Deploy independent LedgerFlow CloudFormation stacks with a JSON context.
+"""Resolve independent LedgerFlow CloudFormation stack plans with JSON context.
 
 This deliberately does not use CloudFormation exports/imports. Each stack's
 ordinary Outputs are read with ``describe-stacks`` and mapped to
 ``CF_OUT_<OutputKey>`` values for the next matching JSON configuration file.
+Stack writes are owned by ``sam_deploy.py`` so every deployment receives the
+same SAM progress and CloudFormation change-set behavior; this module provides
+the repository-wide planner and context helpers used by that adapter.
 """
 
 from __future__ import annotations
@@ -12,14 +15,12 @@ import argparse
 import json
 import os
 import re
-import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 try:
-    from .scripts.config_to_parameters import to_parameters
+    from .manifest import DEFAULT_MANIFEST_PATH, DeploymentManifest, load_manifest
     from .scripts.replace_environment_vars import (
         UnresolvedVariable,
         configuration_values,
@@ -28,21 +29,14 @@ try:
     )
     from .scripts.validate_stack_contract import validate
 except ImportError:  # Running as ``python cloudformation/deploy.py``.
-    from scripts.config_to_parameters import to_parameters
+    from manifest import DEFAULT_MANIFEST_PATH, DeploymentManifest, load_manifest
     from scripts.replace_environment_vars import UnresolvedVariable, configuration_values, load_configuration, resolve_configuration
     from scripts.validate_stack_contract import validate
 
 
-STACK_ORDER = (
-    "00-security",
-    "01-storage",
-    "02-s3-vectors",
-    "03-tools",
-    "04-agentcore",
-    "05-workflow",
-    "06-observability",
-    "07-web-app",
-)
+# Compatibility for callers that used the old tuple.  The value is derived from
+# the manifest rather than being a second source of stack truth.
+STACK_ORDER = load_manifest(DEFAULT_MANIFEST_PATH).stack_ids
 PLACEHOLDER = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
@@ -54,6 +48,7 @@ class StackPlan:
     config_path: str
     parameters: dict[str, str]
     unresolved: list[str]
+    depends_on: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +58,7 @@ class StackPlan:
             "config_path": self.config_path,
             "parameters": self.parameters,
             "unresolved": self.unresolved,
+            "depends_on": list(self.depends_on),
         }
 
 
@@ -92,20 +88,22 @@ def save_context(path: Path, context: dict[str, str]) -> None:
     path.write_text(json.dumps(dict(sorted(context.items())), indent=2) + "\n", encoding="utf-8")
 
 
-def stack_name(environment: str, stack_id: str) -> str:
-    return f"ledgerflow-{environment}-{stack_id}"
+def stack_name(
+    environment: str,
+    stack_id: str,
+    *,
+    manifest: DeploymentManifest | None = None,
+) -> str:
+    return (manifest or load_manifest()).stack_name(environment, stack_id)
 
 
-def stack_ids(selected: str | None, start: str | None) -> list[str]:
-    if selected:
-        if selected not in STACK_ORDER:
-            raise ValueError(f"unknown stack {selected}; choose from {', '.join(STACK_ORDER)}")
-        return [selected]
-    if start:
-        if start not in STACK_ORDER:
-            raise ValueError(f"unknown start stack {start}; choose from {', '.join(STACK_ORDER)}")
-        return list(STACK_ORDER[STACK_ORDER.index(start) :])
-    return list(STACK_ORDER)
+def stack_ids(
+    selected: str | None,
+    start: str | None,
+    *,
+    manifest: DeploymentManifest | None = None,
+) -> list[str]:
+    return list((manifest or load_manifest()).select_stack_ids(selected, start))
 
 
 def build_plan(
@@ -115,10 +113,30 @@ def build_plan(
     context: dict[str, str],
     overrides: dict[str, str],
     allow_unresolved: bool,
-    stacks_dir: Path,
+    stacks_dir: Path | None = None,
+    manifest: DeploymentManifest | None = None,
 ) -> tuple[StackPlan, dict[str, str]]:
-    template_path = stacks_dir / f"{stack_id}.yaml"
-    config_path = stacks_dir / f"{stack_id}.json"
+    if manifest is not None:
+        definition = manifest.definition(stack_id)
+        template_path = definition.template_path
+        config_path = definition.config_path
+        dependencies = definition.depends_on
+        resolved_stack_name = manifest.stack_name(environment, stack_id)
+    elif stacks_dir is not None:
+        # Backwards-compatible helper behavior for callers that provide a
+        # temporary stack directory.  Normal deployment entry points always
+        # pass the validated manifest.
+        template_path = stacks_dir / f"{stack_id}.yaml"
+        config_path = template_path.with_suffix(".json")
+        dependencies = ()
+        resolved_stack_name = f"ledgerflow-{environment}-{stack_id}"
+    else:
+        manifest = load_manifest()
+        definition = manifest.definition(stack_id)
+        template_path = definition.template_path
+        config_path = definition.config_path
+        dependencies = definition.depends_on
+        resolved_stack_name = manifest.stack_name(environment, stack_id)
     if not template_path.exists() or not config_path.exists():
         raise FileNotFoundError(f"missing matching stack files for {stack_id}: {template_path}, {config_path}")
     errors = validate(template_path, config_path)
@@ -139,11 +157,12 @@ def build_plan(
     unresolved = sorted({match.group(0) for value in values.values() for match in PLACEHOLDER.finditer(value)})
     plan = StackPlan(
         stack_id=stack_id,
-        stack_name=stack_name(environment, stack_id),
+        stack_name=resolved_stack_name,
         template_path=str(template_path),
         config_path=str(config_path),
         parameters=values,
         unresolved=unresolved,
+        depends_on=tuple(dependencies),
     )
     return plan, context
 
@@ -152,83 +171,8 @@ def _boto3_client(region: str):
     try:
         import boto3
     except ImportError as exc:
-        raise RuntimeError("boto3 is required for --execute/--change-set; install the AWS deployment extras") from exc
+        raise RuntimeError("boto3 is required for AWS context hydration and stack outputs; install the deployment dependency") from exc
     return boto3.client("cloudformation", region_name=region)
-
-
-def _stack_exists(client: Any, name: str) -> bool:
-    try:
-        client.describe_stacks(StackName=name)
-        return True
-    except Exception as exc:
-        message = str(exc)
-        if "does not exist" in message or "doesn't exist" in message:
-            return False
-        raise
-
-
-def _wait_for_change_set(client: Any, stack_name_value: str, change_set_name: str) -> dict[str, Any]:
-    while True:
-        response = client.describe_change_set(StackName=stack_name_value, ChangeSetName=change_set_name)
-        status = response.get("Status")
-        if status in {"CREATE_COMPLETE", "FAILED"}:
-            if status == "FAILED":
-                reason = str(response.get("StatusReason", "CloudFormation change set failed"))
-                if "didn't contain changes" in reason.lower() or "no updates" in reason.lower():
-                    response["NoChanges"] = True
-                    return response
-                raise RuntimeError(reason)
-            return response
-        time.sleep(2)
-
-
-def _wait_for_stack(client: Any, stack_name_value: str, create: bool) -> None:
-    waiter_name = "stack_create_complete" if create else "stack_update_complete"
-    client.get_waiter(waiter_name).wait(StackName=stack_name_value)
-
-
-def deploy_stack(client: Any, plan: StackPlan, *, execute: bool, change_set_only: bool) -> dict[str, Any]:
-    template_body = Path(plan.template_path).read_text(encoding="utf-8")
-    exists = _stack_exists(client, plan.stack_name)
-    change_set_name = f"ledgerflow-{int(time.time())}-{plan.stack_id.replace('-', '')}"
-    response = client.create_change_set(
-        StackName=plan.stack_name,
-        ChangeSetName=change_set_name,
-        ChangeSetType="UPDATE" if exists else "CREATE",
-        Description=f"LedgerFlow {plan.stack_id} deployment",
-        TemplateBody=template_body,
-        Parameters=to_parameters({"Configuration": [{"Key": key, "Value": value} for key, value in plan.parameters.items()]}),
-        Capabilities=["CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND"],
-    )
-    change_set = _wait_for_change_set(client, plan.stack_name, response["Id"])
-    result: dict[str, Any] = {"change_set_id": response["Id"], "change_set_status": change_set.get("Status")}
-    if change_set.get("NoChanges"):
-        result["no_changes"] = True
-        if exists:
-            result["stack_status"] = client.describe_stacks(StackName=plan.stack_name)["Stacks"][0]["StackStatus"]
-        return result
-    if change_set_only and not execute:
-        return result
-    client.execute_change_set(StackName=plan.stack_name, ChangeSetName=response["Id"])
-    _wait_for_stack(client, plan.stack_name, create=not exists)
-    result["stack_status"] = client.describe_stacks(StackName=plan.stack_name)["Stacks"][0]["StackStatus"]
-    return result
-
-
-def execute_named_change_set(client: Any, *, environment: str, stack_id: str, change_set_name: str) -> dict[str, Any]:
-    """Execute the exact change set returned by ``--change-set``."""
-
-    name = stack_name(environment, stack_id)
-    description = client.describe_change_set(StackName=name, ChangeSetName=change_set_name)
-    if description.get("Status") == "FAILED":
-        raise RuntimeError(description.get("StatusReason", "CloudFormation change set is failed"))
-    client.execute_change_set(StackName=name, ChangeSetName=change_set_name)
-    _wait_for_stack(client, name, create=description.get("ChangeSetType") == "CREATE")
-    return {
-        "change_set_id": description.get("ChangeSetId", change_set_name),
-        "change_set_status": description.get("Status"),
-        "stack_status": client.describe_stacks(StackName=name)["Stacks"][0]["StackStatus"],
-    }
 
 
 def output_context(client: Any, name: str, context: dict[str, str]) -> dict[str, str]:
@@ -244,6 +188,7 @@ def hydrate_prior_outputs(
     environment: str,
     first_stack: str,
     context: dict[str, str],
+    manifest: DeploymentManifest | None = None,
 ) -> dict[str, str]:
     """Rebuild the prior-stack portion of context from CloudFormation.
 
@@ -253,9 +198,9 @@ def hydrate_prior_outputs(
     keeps stacks independent without introducing CloudFormation imports.
     """
 
-    first_index = STACK_ORDER.index(first_stack)
-    for predecessor in STACK_ORDER[:first_index]:
-        name = stack_name(environment, predecessor)
+    deployment_manifest = manifest or load_manifest()
+    for predecessor in deployment_manifest.predecessors(first_stack):
+        name = stack_name(environment, predecessor, manifest=deployment_manifest)
         try:
             context = output_context(client, name, context)
         except Exception as exc:
@@ -270,16 +215,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--environment", default=os.environ.get("ENVIRONMENT_NAME", "dev"))
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1")))
-    parser.add_argument("--stack", choices=STACK_ORDER)
-    parser.add_argument("--from", dest="start_stack", choices=STACK_ORDER)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
+    parser.add_argument("--stack")
+    parser.add_argument("--from", dest="start_stack")
     parser.add_argument("--plan", action="store_true", help="resolve and validate only; never call AWS")
-    parser.add_argument("--change-set", action="store_true", help="create a change set for the selected stack(s) without executing it")
-    parser.add_argument("--execute", action="store_true", help="create and execute change sets in dependency order")
-    parser.add_argument(
-        "--execute-change-set",
-        metavar="STACK_ID=CHANGE_SET",
-        help="execute the exact reviewed change set returned by --change-set",
-    )
+    # Keep the old flags parseable long enough to provide a migration message
+    # instead of an opaque argparse error. They are intentionally hidden: SAM
+    # is the only supported stack write path now.
+    parser.add_argument("--change-set", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--execute", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--execute-change-set", help=argparse.SUPPRESS)
     parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--context-file", type=Path)
     parser.add_argument("--allow-unresolved", action="store_true", help="leave CF_OUT placeholders in a local plan")
@@ -288,47 +233,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    selected_modes = sum(bool(value) for value in (args.plan, args.execute, args.change_set, args.execute_change_set))
-    if selected_modes > 1:
-        raise SystemExit("choose exactly one of --plan, --change-set, --execute, or --execute-change-set")
-    if selected_modes == 0:
-        raise SystemExit("choose --plan, --change-set, --execute, or --execute-change-set; AWS writes are never implicit")
-    if args.execute_change_set and "=" not in args.execute_change_set:
-        raise SystemExit("--execute-change-set requires STACK_ID=CHANGE_SET")
+    if args.execute or args.change_set or args.execute_change_set:
+        raise SystemExit(
+            "deploy.py is a plan/context helper; use cloudformation/sam_deploy.py "
+            "for every stack deployment"
+        )
+    if not args.plan:
+        raise SystemExit("choose --plan; stack deployments use cloudformation/sam_deploy.py")
+    try:
+        manifest = load_manifest(args.manifest)
+        selected_stack_ids = stack_ids(args.stack, args.start_stack, manifest=manifest)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     overrides = parse_overrides(args.overrides)
     context_path = args.context_file or Path(__file__).parent / "build" / f"deployment-context-{args.environment}.json"
     context = load_context(context_path)
     context.update({"EnvironmentName": args.environment, "ENVIRONMENT_NAME": args.environment})
-    stacks_dir = Path(__file__).parent / "stacks"
     plans: list[dict[str, Any]] = []
-    if args.execute_change_set:
-        client = _boto3_client(args.region)
-        stack_id, change_set_name = args.execute_change_set.split("=", 1)
-        if stack_id not in STACK_ORDER:
-            raise SystemExit(f"unknown stack {stack_id}; choose from {', '.join(STACK_ORDER)}")
-        if args.stack and args.stack != stack_id:
-            raise SystemExit("--stack must match the stack ID in --execute-change-set")
-        result = execute_named_change_set(
-            client,
-            environment=args.environment,
-            stack_id=stack_id,
-            change_set_name=change_set_name,
-        )
-        context = output_context(client, stack_name(args.environment, stack_id), context)
-        save_context(context_path, context)
-        print(json.dumps({"environment": args.environment, "region": args.region, "context_file": str(context_path), "stack": stack_id, "deployment": result}, indent=2, sort_keys=True))
-        return 0
-    selected_stack_ids = stack_ids(args.stack, args.start_stack)
-    if args.change_set and len(selected_stack_ids) != 1:
-        raise SystemExit("--change-set reviews one stack at a time; pass --stack STACK_ID and execute it before reviewing the next stack")
-    client = None if args.plan else _boto3_client(args.region)
-    if client is not None:
-        context = hydrate_prior_outputs(
-            client,
-            environment=args.environment,
-            first_stack=selected_stack_ids[0],
-            context=context,
-        )
     for stack_id in selected_stack_ids:
         plan, context = build_plan(
             stack_id,
@@ -336,22 +257,23 @@ def main(argv: list[str] | None = None) -> int:
             context=context,
             overrides=overrides,
             allow_unresolved=args.allow_unresolved or args.plan,
-            stacks_dir=stacks_dir,
+            manifest=manifest,
         )
-        if plan.unresolved and not args.plan:
-            raise SystemExit(f"unresolved values for {stack_id}: {', '.join(plan.unresolved)}")
         item = plan.to_dict()
-        if client is not None:
-            item["deployment"] = deploy_stack(client, plan, execute=args.execute, change_set_only=args.change_set)
-            if args.execute:
-                context = output_context(client, plan.stack_name, context)
-                save_context(context_path, context)
         plans.append(item)
-    if args.plan:
-        print(json.dumps({"environment": args.environment, "region": args.region, "context_file": str(context_path), "stacks": plans}, indent=2, sort_keys=True))
-    else:
-        save_context(context_path, context)
-        print(json.dumps({"environment": args.environment, "region": args.region, "context_file": str(context_path), "stacks": plans}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "environment": args.environment,
+                "region": args.region,
+                "manifest": str(manifest.path),
+                "context_file": str(context_path),
+                "stacks": plans,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

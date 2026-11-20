@@ -34,6 +34,7 @@ PROMPT_NAME_PREFIX = f"ledgerflow-{ENVIRONMENT_NAME}-"
 DEFAULT_PROMPT_MODEL_ID = "amazon.nova-micro-v1:0"
 DEV_TOOLS_CONTROLS_TABLE_NAME = os.environ.get("DEV_TOOLS_CONTROLS_TABLE", "")
 DEV_TOOLS_ENVIRONMENTS = {"dev", "test"}
+TASK_TYPES = {"auto", "investigation", "explanation", "verification"}
 DEV_TOOL_STEPS = (
     "started",
     "planning",
@@ -45,6 +46,7 @@ DEV_TOOL_STEPS = (
     "memory_lookup",
     "context_compaction",
     "report_synthesis",
+    "pre_publish_audit",
 )
 WORKFLOW_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
@@ -55,6 +57,11 @@ bedrock_agent = boto3.client("bedrock-agent", region_name=REGION)
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+if not FRONTEND_DIR.exists():
+    # SAM packages this handler from the repository root so the web and
+    # bootstrap functions share one source tree. Keep the legacy flat ZIP
+    # layout working as well.
+    FRONTEND_DIR = BASE_DIR.parent / "frontend"
 
 
 def _response(status: int, body: Any, content_type: str = "application/json") -> dict[str, Any]:
@@ -363,6 +370,9 @@ def _create_investigation(event: dict[str, Any], claims: dict[str, Any]) -> dict
     workflow_id = requested_workflow_id or f"web-{uuid4().hex}"
     tenant_id = _tenant(claims, payload.get("tenant_id"))
     request = str(payload.get("request") or "Investigate the customer incident.")
+    task_type = str(payload.get("task_type") or "auto").strip().lower()
+    if task_type not in TASK_TYPES:
+        raise ValueError("task_type must be auto, investigation, explanation, or verification")
     input_payload = {
         "customer_id": customer_id,
         "tenant_id": tenant_id,
@@ -370,6 +380,8 @@ def _create_investigation(event: dict[str, Any], claims: dict[str, Any]) -> dict
         "workflow_id": workflow_id,
         "request": request,
     }
+    if task_type != "auto":
+        input_payload["task_type"] = task_type
     started = stepfunctions.start_execution(
         stateMachineArn=STATE_MACHINE_ARN,
         name=workflow_id,
@@ -381,7 +393,7 @@ def _create_investigation(event: dict[str, Any], claims: dict[str, Any]) -> dict
         "workflow",
         "investigation",
         "queued",
-        {"customer_id": customer_id, "request": request, "execution_arn": started["executionArn"]},
+        {"customer_id": customer_id, "request": request, "task_type": task_type, "execution_arn": started["executionArn"]},
     )
     return {"workflow_id": workflow_id, "tenant_id": tenant_id, "execution_arn": started["executionArn"], "status": "queued"}
 

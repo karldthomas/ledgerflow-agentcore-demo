@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .prompting import PromptVersionResolver
+from .retrieval_policies import classify_task, normalize_task_type, policy_for
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class InvestigationPlan:
     include_logs: bool
     include_deployments: bool
     rationale: str
+    task_type: str = "investigation"
+    retrieval_policy_id: str = "investigation-v1"
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InvestigationPlan":
@@ -32,15 +35,19 @@ class InvestigationPlan:
         deployment_version = value.get("deployment_version")
         if deployment_version is not None:
             deployment_version = str(deployment_version).strip() or None
+        task_type = normalize_task_type(value.get("task_type"))
+        policy = policy_for(task_type)
         return cls(
             goal=str(value.get("goal") or "Investigate the reported customer incident."),
             incident_query=str(value.get("incident_query") or ""),
             evidence_query=str(value.get("evidence_query") or "incident evidence"),
             deployment_version=deployment_version,
-            include_invoices=value.get("include_invoices") if isinstance(value.get("include_invoices"), bool) else True,
-            include_logs=value.get("include_logs") if isinstance(value.get("include_logs"), bool) else True,
-            include_deployments=value.get("include_deployments") if isinstance(value.get("include_deployments"), bool) else True,
+            include_invoices=policy.include_invoices,
+            include_logs=policy.include_logs,
+            include_deployments=policy.include_deployments,
             rationale=str(value.get("rationale") or "Use the available read-only evidence sources."),
+            task_type=task_type,
+            retrieval_policy_id=policy.policy_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +60,8 @@ class InvestigationPlan:
             "include_logs": self.include_logs,
             "include_deployments": self.include_deployments,
             "rationale": self.rationale,
+            "task_type": self.task_type,
+            "retrieval_policy_id": self.retrieval_policy_id,
         }
 
 
@@ -126,14 +135,13 @@ class BedrockInvestigationPlanner:
                 "customer_id": str(payload.get("customer_id", "")),
                 "incident_id": str(payload.get("incident_id", "")),
                 "request": str(payload.get("request", "")),
+                "requested_task_type": str(payload.get("task_type", "auto")),
                 "allowed_output": {
                     "goal": "short investigation goal",
                     "incident_query": "incident search text",
                     "evidence_query": "hybrid evidence search text",
                     "deployment_version": "version string or null",
-                    "include_invoices": "boolean",
-                    "include_logs": "boolean",
-                    "include_deployments": "boolean",
+                    "task_type": "one of investigation, explanation, verification",
                     "rationale": "short explanation",
                 },
             },
@@ -149,6 +157,13 @@ class BedrockInvestigationPlanner:
         candidate = self._parse(text)
         incident_default = str(payload.get("incident_id") or payload.get("customer_id") or "").strip()
         evidence_default = "duplicate invoice timeout retry idempotency key"
+        requested_task_type = str(payload.get("task_type") or "").strip().lower()
+        fallback_task_type = classify_task(payload.get("request"), payload.get("task_type"))
+        if requested_task_type and requested_task_type not in {"auto", "automatic"}:
+            task_type = classify_task(payload.get("request"), requested_task_type)
+        else:
+            task_type = normalize_task_type(candidate.get("task_type"), default=fallback_task_type)
+        policy = policy_for(task_type)
         version = candidate.get("deployment_version")
         if not isinstance(version, str) or not version.strip():
             version = None
@@ -157,10 +172,12 @@ class BedrockInvestigationPlanner:
             incident_query=self._text(candidate.get("incident_query"), incident_default),
             evidence_query=self._text(candidate.get("evidence_query"), evidence_default),
             deployment_version=version.strip() if version else None,
-            include_invoices=self._bool(candidate.get("include_invoices")),
-            include_logs=self._bool(candidate.get("include_logs")),
-            include_deployments=self._bool(candidate.get("include_deployments")),
+            include_invoices=policy.include_invoices,
+            include_logs=policy.include_logs,
+            include_deployments=policy.include_deployments,
             rationale=self._text(candidate.get("rationale"), "Use the available read-only evidence sources."),
+            task_type=task_type,
+            retrieval_policy_id=policy.policy_id,
         )
         self.logger({
             "event": "llm_plan",

@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY ledgerflow/__init__.py \
+     ledgerflow/audit.py \
      ledgerflow/cloud_agent.py \
      ledgerflow/context_compaction.py \
      ledgerflow/evidence_reasoning.py \
@@ -14,6 +15,7 @@ COPY ledgerflow/__init__.py \
      ledgerflow/models.py \
      ledgerflow/planner.py \
      ledgerflow/prompting.py \
+     ledgerflow/retrieval_policies.py \
      ledgerflow/reasoning.py \
      ledgerflow/runtime_entry.py \
      ledgerflow/runtime_server.py \

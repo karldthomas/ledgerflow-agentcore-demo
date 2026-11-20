@@ -11,5 +11,6 @@ venv/
 .env
 .DS_Store
 *.log
+.aws-sam/
 cloudformation/build/*
 !cloudformation/build/.gitkeep

@@ -1,64 +1,128 @@
 # Implementation Gaps
 
-## The most important gap for learning
+## The next gap for learning
 
-The highest-value learning project is **context compaction with invariant preservation**.
+The next highest-value learning project is **token budgeting and caching**.
 
-It exercises the central problem in a reliable agent: how to reduce a long-running investigation into a smaller context without losing the rules and facts that make the result safe. A useful implementation would have to preserve, validate, and recover at least these invariants:
+Context compaction now keeps a long investigation safe and bounded, but its
+token count is still a deterministic estimate rather than provider-accurate
+usage. The next lesson is how to allocate a finite model budget across
+instructions, workflow history, evidence, semantic summaries, and output—and
+then reduce repeated cost with Bedrock prompt-prefix caching.
 
-- tenant and authorization boundaries;
-- evidence IDs, source provenance, and claim types;
-- workflow state, checkpoints, and operation IDs;
-- unresolved questions and uncertainty;
-- the distinction between observed facts and model hypotheses.
+This matters because a context can be safe and still be too expensive, too
+slow, or too close to the model limit. The implementation should measure the
+trade-off instead of treating the token budget as a single magic number:
 
-This is more educational than starting with a cost optimization because it connects prompting, retrieval, memory, workflow recovery, and safety in one end-to-end exercise. It also exposes whether the agent can keep making correct decisions after many steps rather than only producing a good report from a short context.
-
-The recommended first implementation is a structured, token-aware compactor with an invariant manifest and tests that compact the same investigation repeatedly, then verify that the resulting context still produces the same safety decisions and evidence citations.
+- preserve mandatory instructions, citations, and safety state first;
+- allocate remaining tokens by evidence value and task stage;
+- record actual input/output tokens, latency, and estimated cost;
+- reuse stable prompt prefixes when the provider supports it; and
+- compare report quality, citation retention, latency, and cost before and
+  after caching.
 
 ## Current baseline
 
-The repository already has a deployable AWS vertical slice with AgentCore, Bedrock, Gateway, Step Functions, DynamoDB, S3, and S3 Vectors. It also has hybrid tenant-scoped retrieval, native Bedrock prompt versions, typed evidence claims under `ledgerflow.evidence.v2`, durable checkpoints, leases, idempotent report publication, and a read-only tool boundary.
+The repository already has a deployable AWS vertical slice with AgentCore, Bedrock, Gateway, Step Functions, DynamoDB, S3, and S3 Vectors. It also has hybrid tenant-scoped retrieval, native Bedrock prompt versions, typed evidence claims under `ledgerflow.evidence.v2`, durable checkpoints, leases, idempotent report publication, a read-only tool boundary, and deployed context compaction with an optional Bedrock semantic pass.
 
 The items below are gaps against the larger case-study target and useful learning opportunities. They are not all defects in the current proof of concept.
 
 ## Ten gaps
 
-### 1. Context compaction and invariant preservation
+### 1. Context compaction and invariant preservation — complete
 
-The runtime currently limits the model packet with character and item-count truncation in `ledgerflow/reasoning.py`. That is not token-aware compaction and does not maintain a formal invariant manifest.
+Implemented in `ledgerflow/context_compaction.py` and the deployed Runtime.
+The deterministic compactor now preserves tenant and read-only invariants,
+mandatory evidence citations, typed claims, workflow state, unresolved
+questions, and bounded memory records. It emits a versioned context manifest,
+and an optional Bedrock semantic pass can add cited observations,
+relationships, hypotheses, and questions without becoming authoritative.
 
-Still missing:
+The `ACME-496` / `INC-1059` pressure case proves the behavior with 138 input
+records: 18 full records, 120 citation-only records, and zero omitted records
+under the default 8,000-token budget. The console exposes those results in the
+timeline hover, Reasoning inspector, and Execution log. Regression coverage
+now includes deterministic repeatability, cross-tenant rejection, citation
+retention, and the pressure fixture.
 
-- a token-budgeted compactor;
-- structured summaries of facts, relationships, hypotheses, unresolved questions, and completed work;
-- durable references back to source evidence rather than copying arbitrary text;
-- invariant checks before and after compaction;
-- repeated-compaction and long-investigation regression tests.
+Remaining work here is refinement rather than the original gap: provider
+accurate token accounting belongs to Gap 2, and larger batch/recovery behavior
+belongs to Gaps 5 and 8.
 
-### 2. Token budgeting and caching
+### 2. Token budgeting and caching — next
 
-The runtime has prompt version selection, but prompt versioning is not the same as token budgeting or Bedrock prompt-prefix caching.
-
-Still missing:
-
-- tokenizer-based input and output budgets per workflow stage;
-- a dynamic allocator for evidence, history, instructions, and report space;
-- input-token, latency, and cost metrics;
-- prompt-prefix cache configuration and cache hit-rate measurement;
-- a benchmark showing the quality/cost trade-off.
-
-### 3. Task-aware retrieval policies
-
-The planner creates an investigation plan, while report synthesis currently uses a fixed investigation task type. Retrieval is hybrid and tenant-scoped, but the policy is not selected from the user’s task.
+The runtime now has a deterministic estimate, a reserved-token budget, bounded
+evidence selection, and compaction telemetry. That is enough to demonstrate
+safe behavior, but it is not yet an operational token-management system.
 
 Still missing:
 
-- task classification for investigation, explanation, verification, and any future operation request;
-- a policy registry describing allowed sources, freshness requirements, ranking weights, and stopping conditions per task;
+- provider-accurate input and output token accounting for each Bedrock stage;
+- a dynamic allocator for instructions, workflow history, evidence, semantic
+  summaries, and report output;
+- per-stage latency, token, and cost metrics in the execution view;
+- Bedrock prompt-prefix cache configuration and cache-hit measurement; and
+- a golden-case benchmark showing the quality/cost trade-off at several
+  budgets.
+
+The best first exercise is to instrument planner, compaction, and synthesis
+with actual usage metadata, then compare a fixed 8,000-token run with smaller
+budgets and a cache-enabled run. The benchmark should verify that citations,
+typed claims, invariant flags, and report quality do not regress while token
+consumption, latency, or cost improves. A cache hit must never allow stale
+tenant evidence or an old prompt version to leak into a new request; the cache
+key must include the active prompt version and the stable instruction prefix,
+while request-specific evidence remains dynamic.
+
+### 3. Task-aware retrieval policies — implemented
+
+The planner now returns a validated `task_type`, and
+`ledgerflow/retrieval_policies.py` maps it to a deterministic, read-only
+retrieval recipe. The deployed console can let the planner classify a request
+or accept an explicit investigation, explanation, or verification selection.
+
+Implemented policies are:
+
+- `investigation-v1`: structured incident, invoice, log, and deployment data;
+  hybrid S3 Vectors retrieval; and verified memory;
+- `explanation-v1`: incident/deployment context plus runbook-only,
+  semantic-oriented evidence; and
+- `verification-v1`: current structured records plus authoritative runbook
+  corroboration, with an authority/freshness/identifier rerank.
+
+The runtime records the selected policy, source scope, strategy, and limits in
+the execution events, carries the task type into the report, and falls back to
+the bounded investigation policy when planning is unavailable or invalid. The
+tenant filter and read-only authorization remain independent of classification.
+
+Still missing:
+
 - bounded iterative retrieval when evidence is incomplete;
-- policy-selection and retrieval-quality telemetry;
-- meaningful chunking and evaluation of long runbooks rather than relying primarily on one vector per document.
+- explicit source freshness requirements beyond the current active-record
+  preference;
+- retrieval Recall@k/MRR and policy-quality benchmarks; and
+- meaningful chunking and evaluation of long runbooks rather than relying
+  primarily on one vector per document.
+
+### Cross-cutting contract validation — implemented
+
+The deployed workflow now validates the structured investigation contract in
+two places. The AgentCore Runtime runs a deterministic gate immediately before
+report publication. Step Functions then invokes the audit Lambda after the
+Runtime returns; the Lambda rereads the durable checkpoint and event history,
+reconstructs the evidence packet, and records a `post_run` audit event.
+
+The checks cover task-policy selection, tenant scope, evidence schema, required
+and authorized citations, typed claim references, excluded source scopes,
+memory boundaries, and the read-only tool contract. The website exposes the
+pre-publication gate and post-run audit as timeline stages and displays the
+bounded result in the report and execution log.
+
+This is deliberately not a Bedrock quality evaluation. It proves that the
+workflow obeyed deterministic structural contracts; it does not judge whether
+an LLM hypothesis is correct. The remaining evaluation gap is to measure
+quality, retrieval accuracy, cost, latency, and recovery across a golden-case
+corpus rather than only validating one run's structure.
 
 ### 4. Memory lifecycle and verified-fact management
 
@@ -155,9 +219,10 @@ This should be implemented last among the ten. The read-only boundary should rem
 
 ## Suggested learning order
 
-1. Context compaction and invariant preservation.
-2. Token budgeting and caching.
-3. Task-aware retrieval policies.
+1. ~~Context compaction and invariant preservation~~ — complete.
+2. **Token budgeting and caching** — next.
+3. ~~Task-aware retrieval policies~~ — implemented; iterative retrieval and
+   evaluation remain open sub-gaps.
 4. Memory lifecycle.
 5. Recovery depth.
 6. Adversarial and authorization tests.

@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: Durable batch workflow and optional AgentCore online evaluation.
 
 Parameters:
@@ -7,6 +8,12 @@ Parameters:
   RuntimeId:
     Type: String
   RuntimeArn:
+    Type: String
+  KmsKeyArn:
+    Type: String
+  WorkflowCheckpointsTableName:
+    Type: String
+  WorkflowEventsTableName:
     Type: String
   WorkflowExecutionRoleArn:
     Type: String
@@ -32,6 +39,54 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/ledgerflow/${EnvironmentName}/workflow
       RetentionInDays: 30
+
+  AuditExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ledgerflow-${EnvironmentName}-audit
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DeterministicWorkflowAudit
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowCheckpointsTableName}
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WorkflowEventsTableName}
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref KmsKeyArn
+
+  WorkflowAuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ledgerflow-${EnvironmentName}-workflow-audit
+      Runtime: python3.12
+      Handler: lambda.audit_handler.handler
+      Role: !GetAtt AuditExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      CodeUri: ../../
+      Environment:
+        Variables:
+          WORKFLOW_CHECKPOINTS_TABLE: !Ref WorkflowCheckpointsTableName
+          WORKFLOW_EVENTS_TABLE: !Ref WorkflowEventsTableName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
 
   InvestigationStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -63,9 +118,41 @@ Resources:
               ],
               "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "InvestigationFailed"}],
               "ResultPath": "$.agent_result",
-              "Next": "InvestigationSucceeded"
+              "Next": "AuditInvestigation"
+            },
+            "AuditInvestigation": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${WorkflowAuditFunction.Arn}",
+                "Payload": {
+                  "workflow_id.$": "$.workflow_id",
+                  "tenant_id.$": "$.tenant_id",
+                  "customer_id.$": "$.customer_id"
+                }
+              },
+              "Retry": [
+                {"ErrorEquals": ["States.Timeout", "States.TaskFailed", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2.0}
+              ],
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "InvestigationAuditFailed"}],
+              "ResultSelector": {"audit.$": "$.Payload"},
+              "ResultPath": "$.audit_result",
+              "Next": "AuditDecision"
+            },
+            "AuditDecision": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.audit_result.audit.passed", "BooleanEquals": true, "Next": "InvestigationSucceeded"}
+              ],
+              "Default": "InvestigationCompletedWithFindings"
             },
             "InvestigationSucceeded": {"Type": "Succeed"},
+            "InvestigationCompletedWithFindings": {"Type": "Succeed"},
+            "InvestigationAuditFailed": {
+              "Type": "Fail",
+              "Error": "LedgerFlow.InvestigationAuditFailed",
+              "Cause": "The post-run deterministic audit could not be completed."
+            },
             "InvestigationFailed": {
               "Type": "Fail",
               "Error": "LedgerFlow.InvestigationFailed",
@@ -107,6 +194,8 @@ Outputs:
     Value: !GetAtt InvestigationStateMachine.Arn
   StateMachineName:
     Value: !Ref InvestigationStateMachine
+  AuditFunctionArn:
+    Value: !GetAtt WorkflowAuditFunction.Arn
   EvaluationConfigArn:
     Value: !GetAtt AgentCoreOnlineEvaluation.OnlineEvaluationConfigArn
   WorkflowLogGroupName:

@@ -6,15 +6,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-import cloudformation.deploy as deploy_module
 from cloudformation.deploy import build_plan
+from cloudformation.manifest import load_manifest
 from cloudformation.scripts.validate_stack_contract import validate
 from cloudformation.scripts.replace_environment_vars import resolve_configuration
 
 
 ROOT = Path(__file__).parents[1]
 STACKS = ROOT / "cloudformation" / "stacks"
-STACK_ORDER = ("00-security", "01-storage", "02-s3-vectors", "03-tools", "04-agentcore", "05-workflow", "06-observability", "07-web-app")
+STACK_ORDER = load_manifest().stack_ids
 
 
 def test_matching_stack_json_files_and_forbidden_coupling_are_absent():
@@ -107,29 +107,21 @@ def test_stack_configuration_covers_all_required_template_parameters():
         assert validate(template, template.with_suffix(".json")) == []
 
 
-def test_exact_change_set_path_hydrates_context_without_an_aws_call(monkeypatch, tmp_path):
-    fake_client = object()
-    monkeypatch.setattr(deploy_module, "_boto3_client", lambda _region: fake_client)
-    monkeypatch.setattr(
-        deploy_module,
-        "execute_named_change_set",
-        lambda client, **kwargs: {"stack_status": "CREATE_COMPLETE"},
-    )
-    monkeypatch.setattr(
-        deploy_module,
-        "output_context",
-        lambda client, name, context: {**context, "CF_OUT_KmsKeyArn": "arn:test"},
-    )
-
-    assert deploy_module.main(
+def test_direct_cloudformation_writes_are_rejected_in_favor_of_sam():
+    result = subprocess.run(
         [
+            sys.executable,
+            "cloudformation/deploy.py",
             "--environment",
             "test",
-            "--execute-change-set",
-            "00-security=reviewed-change-set",
-            "--context-file",
-            str(tmp_path / "context.json"),
-        ]
-    ) == 0
-    context = json.loads((tmp_path / "context.json").read_text(encoding="utf-8"))
-    assert context["CF_OUT_KmsKeyArn"] == "arn:test"
+            "--stack",
+            "00-security",
+            "--execute",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "cloudformation/sam_deploy.py" in result.stderr

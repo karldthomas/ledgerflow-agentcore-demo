@@ -6,11 +6,13 @@
     ["invoice_lookup", "Check invoices"],
     ["log_lookup", "Read application logs"],
     ["deployment_lookup", "Trace deployment"],
-    ["retrieval", "Hybrid evidence search"],
+    ["retrieval", "Task-aware evidence search"],
     ["memory_lookup", "Recall verified memory"],
     ["context_compaction", "Compact context"],
     ["report_synthesis", "Synthesize report"],
+    ["pre_publish_audit", "Validate report"],
     ["completed", "Publish report"],
+    ["post_run_audit", "Audit result"],
   ];
   const FLOW_EVENT_MAP = {
     search_incidents: "incident_lookup",
@@ -22,7 +24,11 @@
     context_compaction: "context_compaction",
     reasoning_compaction: "context_compaction",
     reasoning_plan: "started",
+    retrieval_policy: "started",
     reasoning_synthesis: "report_synthesis",
+    pre_publish_audit: "pre_publish_audit",
+    post_run_audit: "post_run_audit",
+    deterministic_audit: "post_run_audit",
   };
   const FLOW_DETAILS = {
     started: {
@@ -51,7 +57,7 @@
       operation: "get_deployments",
     },
     retrieval: {
-      description: "Combines lexical and vector evidence search, then applies tenant-scoped ranking.",
+      description: "Applies the selected task policy to source scope, ranking strategy, and result limits.",
       source: "S3 Vectors + runbooks",
       operation: "search_evidence",
     },
@@ -70,10 +76,20 @@
       source: "Runtime + Bedrock",
       operation: "report synthesis",
     },
+    pre_publish_audit: {
+      description: "Runs the deterministic contract gate before the Runtime publishes the report.",
+      source: "Runtime audit contract",
+      operation: "pre-publication audit",
+    },
     completed: {
       description: "Publishes the prepared report and records the completed workflow checkpoint.",
       source: "Report store",
       operation: "report publication",
+    },
+    post_run_audit: {
+      description: "Re-checks the completed workflow from the persisted checkpoint and records the result for operators.",
+      source: "Step Functions + audit Lambda",
+      operation: "post-run audit",
     },
   };
   const state = { accessToken: null, idToken: null, claims: {}, challengeSession: null, workflowId: null, timer: null, events: [] };
@@ -222,11 +238,16 @@
       if (Array.isArray(payload.report.evidence_claims) && payload.report.evidence_claims.length) facts.push(`${payload.report.evidence_claims.length} typed claims`);
     }
     if (payload.plan) {
+      if (payload.plan.task_type) facts.push(`Task: ${payload.plan.task_type}`);
+      if (payload.plan.retrieval_policy_id) facts.push(`Policy: ${payload.plan.retrieval_policy_id}`);
       if (payload.plan.incident_query) facts.push(`Incident query: ${compactFlowValue(payload.plan.incident_query)}`);
       if (payload.plan.evidence_query) facts.push(`Evidence query: ${compactFlowValue(payload.plan.evidence_query)}`);
       const sources = [payload.plan.include_invoices && "invoices", payload.plan.include_logs && "logs", payload.plan.include_deployments && "deployments"].filter(Boolean);
       if (sources.length) facts.push(`Sources: ${sources.join(", ")}`);
     }
+    if (payload.policy_id) facts.push(`Policy: ${payload.policy_id}`);
+    if (payload.strategy) facts.push(`Search strategy: ${payload.strategy}`);
+    if (Array.isArray(payload.source_types) && payload.source_types.length) facts.push(`Document types: ${payload.source_types.join(", ")}`);
     if (payload.arguments && typeof payload.arguments === "object") {
       const keys = Object.keys(payload.arguments);
       const safeKeys = ["customer_id", "incident_id", "tenant_id", "query", "version", "limit", "top_k"];
@@ -235,6 +256,10 @@
     }
     if (payload.reason) facts.push(`Reason: ${compactFlowValue(payload.reason)}`);
     if (payload.error) facts.push(`Error: ${compactFlowValue(payload.error)}`);
+    if (payload.passed !== undefined) facts.push(payload.passed ? `Audit passed` : `Audit failed`);
+    if (payload.check_count !== undefined) facts.push(`${payload.passed_count ?? 0} / ${payload.check_count} checks passed`);
+    if (Array.isArray(payload.failed_checks) && payload.failed_checks.length) facts.push(`Failed: ${payload.failed_checks.join(", ")}`);
+    if (payload.mode) facts.push(`Audit mode: ${payload.mode}`);
     if (!facts.length) facts.push(item.status === "completed" ? "Checkpoint completed" : "Checkpoint recorded");
     return facts;
   }
@@ -328,7 +353,9 @@
   function renderFlow(status, events) {
     const checkpoint = status?.step || "started";
     const currentIndex = FLOW.findIndex(([key]) => key === checkpoint);
-    const failed = events.find((item) => item.status === "failed");
+    const runtimeComplete = checkpoint === "completed";
+    const postAuditEvents = flowEventsFor("post_run_audit", events);
+    const postAuditComplete = postAuditEvents.some((item) => ["completed", "failed"].includes(item.status));
     const counts = {};
     events.forEach((item) => {
       const flowKey = flowKeyForEvent(item);
@@ -336,9 +363,11 @@
     });
     $("flow-board").classList.remove("empty-flow");
     $("flow-board").innerHTML = `<div class="flow-track">${FLOW.map(([key, label], index) => {
-      const done = index < currentIndex || checkpoint === "completed";
-      const active = index === currentIndex && checkpoint !== "completed";
-      const stateClass = failed && key === checkpoint ? "failed" : done ? "done" : active ? "active" : "";
+      const stageEvents = flowEventsFor(key, events);
+      const stageFailed = stageEvents.some((item) => item.status === "failed");
+      const done = key === "post_run_audit" ? postAuditComplete : index < currentIndex || runtimeComplete;
+      const active = key === "post_run_audit" ? runtimeComplete && !postAuditComplete : index === currentIndex && !runtimeComplete;
+      const stateClass = stageFailed ? "failed" : done ? "done" : active ? "active" : "";
       const description = FLOW_DETAILS[key]?.description || "Inspect this workflow stage.";
       return `<button type="button" class="flow-step ${stateClass}" data-flow-key="${key}" aria-label="${escapeHtml(label)}: ${escapeHtml(description)}"><span class="step-dot">${done ? "✓" : active ? "•" : index + 1}</span><span class="step-label">${label}</span><span class="step-count">${counts[key] || 0} events</span></button>`;
     }).join("")}</div><div id="flow-hover-detail" class="flow-hover-detail hidden" role="status" aria-live="polite"></div>`;
@@ -414,11 +443,23 @@
     return `<div class="report-label">Evidence reasoning</div><div class="claim-list">${claims.map((claim) => `<div class="claim-card"><div class="claim-heading"><span class="claim-type">${escapeHtml(claim.type || "claim")}</span><span>${escapeHtml((claim.evidence_ids || []).join(", "))}</span></div><p>${escapeHtml(claim.statement || "")}</p></div>`).join("")}</div>`;
   }
 
-  function renderReport(report) {
+  function auditSummaryMarkup(events) {
+    const audits = (events || []).filter((item) => item.event_type === "deterministic_audit" && item.payload && typeof item.payload === "object").sort((a, b) => eventTime(a) - eventTime(b));
+    if (!audits.length) return "";
+    const latest = audits[audits.length - 1];
+    const payload = latest.payload || {};
+    const failed = latest.status === "failed" || payload.passed === false;
+    const label = payload.mode === "post_run" ? "Post-run audit" : payload.mode === "pre_publish" ? "Pre-publication gate" : "Deterministic audit";
+    const checkLabel = payload.check_count !== undefined ? `${payload.passed_count ?? 0} / ${payload.check_count} checks passed` : "Structured contract checks recorded";
+    const failedChecks = Array.isArray(payload.failed_checks) ? payload.failed_checks : [];
+    return `<div class="audit-summary ${failed ? "failed" : "passed"}"><div class="audit-summary-heading"><div><div class="report-label">Deterministic validation</div><strong>${escapeHtml(label)}</strong></div><span>${failed ? "Needs review" : "Passed"}</span></div><p>${escapeHtml(failed ? "The workflow completed with deterministic contract findings. Inspect the execution log for the full check details." : "The report passed the structured evidence, tenant, citation, and read-only contract checks.")}</p><div class="audit-summary-facts"><span>${escapeHtml(checkLabel)}</span><span>Schema: ${escapeHtml(payload.schema_version || "ledgerflow.audit.v1")}</span><span>Mode: ${escapeHtml(payload.mode || "unknown")}</span>${failedChecks.length ? `<span>Failed: ${escapeHtml(failedChecks.join(", "))}</span>` : ""}</div></div>`;
+  }
+
+  function renderReport(report, events = []) {
     if (!report) { $("report-view").innerHTML = "<span>Complete an investigation to see the report.</span>"; $("report-confidence").textContent = "—"; return; }
     $("report-confidence").textContent = `${Math.round(Number(report.confidence || 0) * 100)}% confidence`;
     $("report-view").classList.remove("empty-detail");
-    $("report-view").innerHTML = `<div class="report-grid"><div><div class="report-label">Executive summary</div><p class="report-lead">${escapeHtml(report.executive_summary)}</p><div class="report-label">Root cause</div><p>${escapeHtml(report.root_cause)}</p><div class="report-label">Timeline</div>${listMarkup(report.incident_timeline)}<div class="report-label">Recommended actions</div>${listMarkup(report.recommended_actions)}</div><div><div class="report-label">Verified findings</div>${listMarkup(report.verified_findings)}<div class="report-label">Unresolved questions</div>${listMarkup(report.unresolved_questions)}<div class="report-label">Evidence IDs</div><div class="evidence-chips">${(report.evidence_ids || []).map((id) => `<span class="evidence-chip">${escapeHtml(id)}</span>`).join("")}</div></div></div>${claimMarkup(report.evidence_claims)}`;
+    $("report-view").innerHTML = `${auditSummaryMarkup(events)}<div class="report-grid"><div><div class="report-label">Task type</div><p>${escapeHtml(report.task_type || "investigation")}</p><div class="report-label">Executive summary</div><p class="report-lead">${escapeHtml(report.executive_summary)}</p><div class="report-label">Root cause</div><p>${escapeHtml(report.root_cause)}</p><div class="report-label">Timeline</div>${listMarkup(report.incident_timeline)}<div class="report-label">Recommended actions</div>${listMarkup(report.recommended_actions)}</div><div><div class="report-label">Verified findings</div>${listMarkup(report.verified_findings)}<div class="report-label">Unresolved questions</div>${listMarkup(report.unresolved_questions)}<div class="report-label">Evidence IDs</div><div class="evidence-chips">${(report.evidence_ids || []).map((id) => `<span class="evidence-chip">${escapeHtml(id)}</span>`).join("")}</div></div></div>${claimMarkup(report.evidence_claims)}`;
   }
 
   async function refreshWorkflow() {
@@ -427,9 +468,16 @@
       const data = await api(`/api/investigations/${encodeURIComponent(state.workflowId)}`);
       $("run-title").textContent = `${data.customer_id || "Investigation"} · ${data.workflow_id}`;
       $("run-meta").innerHTML = `<span>${escapeHtml(data.tenant_id || "tenant")}</span><span>checkpoint: ${escapeHtml(data.step || "queued")}</span><span>${data.updated_at ? new Date(data.updated_at).toLocaleTimeString() : "starting"}</span>`;
-      const isDone = data.step === "completed"; const hasInjectedFailure = data.events?.some((item) => item.event_type === "failure_injection" && item.status === "failed"); const isFailed = !hasInjectedFailure && data.events?.some((item) => item.status === "failed");
-      $("run-status").className = `status-pill ${isFailed ? "failed" : isDone ? "ready" : "running"}`; $("run-status").innerHTML = `<span></span> ${isFailed ? "Needs review" : isDone ? "Completed" : hasInjectedFailure ? "Recovering" : "Investigating"}`;
-      renderFlow(data, data.events || []); renderEvents(data.events || []); renderReport(data.report);
+      const events = data.events || [];
+      const runtimeDone = data.step === "completed";
+      const hasPostAudit = events.some((item) => item.event_type === "deterministic_audit" && item.step === "post_run_audit" && ["completed", "failed"].includes(item.status));
+      const postAuditFailed = events.some((item) => item.event_type === "deterministic_audit" && item.step === "post_run_audit" && (item.status === "failed" || (item.payload || {}).passed === false));
+      const hasInjectedFailure = events.some((item) => item.event_type === "failure_injection" && item.status === "failed");
+      const isFailed = !hasInjectedFailure && (postAuditFailed || events.some((item) => item.status === "failed"));
+      const isDone = runtimeDone && hasPostAudit;
+      const statusText = isFailed ? "Needs review" : isDone ? "Completed" : hasInjectedFailure ? "Recovering" : runtimeDone ? "Auditing" : "Investigating";
+      $("run-status").className = `status-pill ${isFailed ? "failed" : isDone ? "ready" : "running"}`; $("run-status").innerHTML = `<span></span> ${statusText}`;
+      renderFlow(data, events); renderEvents(events); renderReport(data.report, events);
       if (isDone || isFailed) { clearInterval(state.timer); state.timer = null; }
     } catch (error) { $("investigation-error").textContent = error.message; show($("investigation-error"), true); }
   }
@@ -438,6 +486,8 @@
     event.preventDefault(); show($("investigation-error"), false);
     try {
       const payload = { customer_id: $("customer-id").value.trim(), incident_id: $("incident-id").value.trim(), tenant_id: $("tenant-id").value.trim(), request: $("request-text").value.trim() };
+      const taskType = $("task-type").value;
+      if (taskType && taskType !== "auto") payload.task_type = taskType;
       const workflowId = groups().includes("admins") ? $("workflow-id").value.trim() : "";
       if (workflowId) payload.workflow_id = workflowId;
       const data = await api("/api/investigations", { method: "POST", body: JSON.stringify(payload) });

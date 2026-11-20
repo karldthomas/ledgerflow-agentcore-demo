@@ -1,10 +1,8 @@
 {
-  "Description": "Cognito-protected Lambda-served LedgerFlow console.",
+  "Description": "Cognito-protected SAM-built Lambda-served LedgerFlow console.",
   "Configuration": [
     {"Key": "EnvironmentName", "Value": "${EnvironmentName}", "Default": "dev"},
     {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
-    {"Key": "ArtifactBucketName", "Value": "${CF_OUT_ArtifactBucketName}"},
-    {"Key": "WebArtifactKey", "Value": "${WEB_ARTIFACT_KEY}", "Default": "lambda/web_app.zip"},
     {"Key": "StateMachineArn", "Value": "${CF_OUT_StateMachineArn}"},
     {"Key": "WorkflowCheckpointsTableName", "Value": "${CF_OUT_WorkflowCheckpointsTableName}"},
     {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
