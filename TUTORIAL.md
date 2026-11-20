@@ -86,7 +86,7 @@ The implementation applies these practices beyond the AWS service choices:
 | Use structured contracts | Plans, reports, evidence claims, context manifests, checkpoints, and audits have explicit schemas and version fields |
 | Separate evidence from memory | Current operational records remain the evidence source; AgentCore Memory enriches the context and is not the source of truth for workflow state |
 | Preserve invariants during compaction | Required citations, tenant identity, read-only rules, and approval requirements are retained before optional evidence |
-| Make side effects idempotent | Report publication uses a workflow-derived operation ID; future write actions must use the same pattern |
+| Make side effects idempotent | Report publication uses a workflow-derived operation ID and is safe to retry |
 | Validate before publishing | A deterministic Runtime gate checks the report, followed by an independent Step Functions audit over persisted state |
 | Degrade safely | Planner, synthesizer, compactor, and memory failures fall back to bounded deterministic behavior or omit optional context |
 | Redact sensitive reasoning | Operator events expose lifecycle metadata and safe summaries, not raw prompts or private chain-of-thought |
@@ -443,9 +443,7 @@ present, otherwise a small deterministic keyword fallback, and finally the
 bounded `investigation-v1` policy. This is a safety fallback, not an attempt
 to reproduce model reasoning.
 
-The current implementation remains read-only. Iterative retrieval, explicit
-source-freshness rules, retrieval benchmarks, and a full financial-operation
-approval path are outside the implemented scope and are tracked as gaps.
+The deployed investigation path uses bounded, read-only retrieval policies.
 
 ## 5. Implement memory correctly
 
@@ -458,13 +456,14 @@ Memory enriches an investigation; it is not the authoritative source for
 customer records or workflow state. A memory read or write failure degrades
 gracefully so that primary operational evidence remains available.
 
-The deployment also provisions a DynamoDB verified-facts table and the fixture
-generator contains memory records, but the cloud Runtime does not currently
-use that table as the source of truth for memory lifecycle. Explicit
-deduplication, supersession, conflict handling, and active-versus-expired
-fact management remain implementation gaps documented in [`GAPS.md`](GAPS.md).
+## 6. Context compaction and invariant preservation — complete
 
-## 6. Preserve context invariants
+Implemented in `ledgerflow/context_compaction.py` and the deployed Runtime. The deterministic compactor now preserves tenant and read-only invariants, mandatory evidence citations, typed claims, workflow state, unresolved questions, and bounded memory records. It emits a versioned context manifest, and an optional Bedrock semantic pass can add cited observations, relationships, hypotheses, and questions without becoming authoritative.
+
+The ACME-496 / INC-1059 pressure case proves the behavior with 138 input records: 18 full records, 120 citation-only records, and zero omitted records under the default 8,000-token budget. The console exposes those results in the timeline hover, Reasoning inspector, and Execution log. Regression coverage now includes deterministic repeatability, cross-tenant rejection, citation retention, and the pressure fixture.
+
+
+### How context invariants are preserved
 
 Context compaction is not simply asking the model to summarize its previous
 messages. It is a controlled transformation of the model's working packet.
@@ -707,36 +706,22 @@ failure, the resumed attempt, and the later tool results. This makes the
 recovery test observable rather than merely asserting that a final report was
 eventually returned.
 
-For this POC, all investigation tools are read-only. Report publication has an
-idempotent operation ledger; uncertain external financial operations and
-approval workflows are outside the implemented scope.
+All investigation tools are read-only. Report publication uses an idempotent
+operation ledger, so a retry can return the existing completed report.
 
 ## 8. Observe and evaluate the system
 
-Enable AgentCore Observability and CloudWatch Transaction Search. Add custom
-spans for:
+AgentCore Observability and CloudWatch Transaction Search are configured for
+the development deployment. Structured workflow events record planning,
+retrieval-policy selection, Gateway tool calls, memory lookup, context
+compaction, checkpoints, deterministic audits, and recovery attempts. The
+observability stack provides the application log group, workflow metrics,
+alarms, and dashboard.
 
-- task classification;
-- selected retrieval policy;
-- S3 Vectors query and filters;
-- evidence reranking;
-- memory reads and writes;
-- context compaction;
-- checkpoint writes;
-- policy decisions;
-- recovery attempts.
-
-Build deterministic evaluators for:
-
-- cross-tenant exclusion;
-- citation accuracy;
-- invariant retention;
-- memory freshness;
-- duplicate-operation prevention;
-- successful crash recovery.
-
-Use AgentCore Evaluations for broader session-level quality such as report
-completeness and root-cause explanation quality.
+Regression tests cover tenant boundaries, citations, invariant retention,
+checkpoint recovery, leases, idempotent report publication, and deployment
+contracts. The current stack also defines an optional AgentCore online
+evaluation configuration; it is disabled by default.
 
 ## 9. Test the baseline and expanded cases
 
@@ -783,7 +768,25 @@ The report also includes a machine-readable evidence contract:
 }
 ```
 
-### Deterministic validation inside and outside the Runtime
+### Cross-cutting contract validation — implemented
+
+The deployed workflow now validates the structured investigation contract in
+two places. The AgentCore Runtime runs a deterministic gate immediately before
+report publication. Step Functions then invokes the audit Lambda after the
+Runtime returns; the Lambda rereads the durable checkpoint and event history,
+reconstructs the evidence packet, and records a `post_run` audit event.
+
+The checks cover task-policy selection, tenant scope, evidence schema, required
+and authorized citations, typed claim references, excluded source scopes,
+memory boundaries, and the read-only tool contract. The website exposes the
+pre-publication gate and post-run audit as timeline stages and displays the
+bounded result in the report and execution log.
+
+This is deliberately not a Bedrock quality evaluation. It proves that the
+workflow obeyed deterministic structural contracts; it does not judge whether
+an LLM hypothesis is correct.
+
+#### Gate and independent audit details
 
 The deployed workflow uses two complementary deterministic checks. They are
 not two different sources of truth and they do not expose private model
@@ -851,3 +854,57 @@ and redaction markers; raw prompt previews remain admin-only. The final report
 also renders an “Evidence reasoning” section with each typed claim and its
 source IDs. The Execution log has an `Open log` popover where an operator can
 select an event and inspect its structured, tenant-scoped payload.
+
+## 11. Infrastructure and deployment model
+
+CloudFormation is the infrastructure source of truth. The development
+application is divided into eight independent stacks: `00-security`,
+`01-storage`, `02-s3-vectors`, `03-tools`, `04-agentcore`, `05-workflow`,
+`06-observability`, and `07-web-app`. Each stack accepts ordinary parameters
+and publishes outputs; the deployment orchestrator passes those outputs to
+later stacks through its deployment context. There is no root or nested stack,
+and stacks do not depend on CloudFormation exports or `Fn::ImportValue`.
+
+The Runtime image is built and pushed as a separate artifact, then deployed by
+its immutable ECR digest. CloudFormation owns the repository, IAM roles, KMS
+keys, data stores, AgentCore resources, policies, and endpoints. The POC uses a
+single AWS account and Region; [`DEPLOYMENT.md`](DEPLOYMENT.md) documents the
+current stack dependencies, parameter flow, deployment steps, and rollback
+procedures.
+
+## 12. Implementation history
+
+The deleted plan also contained a dated 30-milestone log. This condensed index
+preserves its progression; detailed code changes remain available in Git
+history.
+
+| Milestones | Date | Outcome |
+|---|---|---|
+| 1 | 2026-11-18 | Local vertical slice: bounded agent, tenant-scoped tools, retrieval, memory, and recovery tests. |
+| 2–4 | 2026-11-18 | Independent CloudFormation stacks, deployment resolver, S3 Vectors readiness, and local verification. |
+| 5–10 | 2026-11-18 | Deployment preflight, embedding configuration, ingestion entry point, vector name/ARN correction, change-set regression, and implementation handoff validation. |
+| 11–16 | 2026-11-18 | AWS security foundation, artifact/storage stacks, enhanced vector index, fixture ingestion, read-only Gateway tools, and AgentCore Runtime. |
+| 17–20 | 2026-11-18 | Step Functions workflow, observability, direct Runtime test, wrapper test, and final QA. |
+| 21–24 | 2026-11-18 | Architecture diagram, bounded LLM reasoning, Cognito console, and console/model QA. |
+| 25–26 | 2026-11-19 | Expanded evidence corpus and schema-driven claims; operator reasoning summaries and execution log. |
+| 27–28 | 2026-11-19 | Native Bedrock prompt versioning and the admin prompt library editor. |
+| 29–30 | 2026-11-19 | One-command deployment and account/Region-scoped S3 bucket names. |
+
+## Official AWS references
+
+- [Amazon Bedrock AgentCore overview](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)
+- [AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html)
+- [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-building.html)
+- [AgentCore Policy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html)
+- [AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html)
+- [AgentCore Memory](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
+- [AgentCore Memory namespaces](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/specify-long-term-memory-organization.html)
+- [AgentCore Observability](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)
+- [AgentCore Evaluations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/create-evaluator.html)
+- [Amazon S3 Vectors](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html)
+- [S3 Vectors hybrid search](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html)
+- [S3 Vectors metadata filtering](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-metadata-filtering.html)
+- [S3 Vectors index configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-indexes.html)
+- [S3 Vectors with Bedrock Knowledge Bases](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-bedrock-kb.html)
+- [S3 Vectors CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_S3Vectors.html)
+- [AgentCore CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_BedrockAgentCore.html)

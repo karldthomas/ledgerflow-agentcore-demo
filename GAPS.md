@@ -27,27 +27,7 @@ The repository already has a deployable AWS vertical slice with AgentCore, Bedro
 
 The items below are gaps against the larger case-study target and useful learning opportunities. They are not all defects in the current proof of concept.
 
-## Ten gaps
-
-### 1. Context compaction and invariant preservation — complete
-
-Implemented in `ledgerflow/context_compaction.py` and the deployed Runtime.
-The deterministic compactor now preserves tenant and read-only invariants,
-mandatory evidence citations, typed claims, workflow state, unresolved
-questions, and bounded memory records. It emits a versioned context manifest,
-and an optional Bedrock semantic pass can add cited observations,
-relationships, hypotheses, and questions without becoming authoritative.
-
-The `ACME-496` / `INC-1059` pressure case proves the behavior with 138 input
-records: 18 full records, 120 citation-only records, and zero omitted records
-under the default 8,000-token budget. The console exposes those results in the
-timeline hover, Reasoning inspector, and Execution log. Regression coverage
-now includes deterministic repeatability, cross-tenant rejection, citation
-retention, and the pressure fixture.
-
-Remaining work here is refinement rather than the original gap: provider
-accurate token accounting belongs to Gap 2, and larger batch/recovery behavior
-belongs to Gaps 5 and 8.
+## Tracked implementation gaps
 
 ### 2. Token budgeting and caching — next
 
@@ -74,26 +54,7 @@ tenant evidence or an old prompt version to leak into a new request; the cache
 key must include the active prompt version and the stable instruction prefix,
 while request-specific evidence remains dynamic.
 
-### 3. Task-aware retrieval policies — implemented
-
-The planner now returns a validated `task_type`, and
-`ledgerflow/retrieval_policies.py` maps it to a deterministic, read-only
-retrieval recipe. The deployed console can let the planner classify a request
-or accept an explicit investigation, explanation, or verification selection.
-
-Implemented policies are:
-
-- `investigation-v1`: structured incident, invoice, log, and deployment data;
-  hybrid S3 Vectors retrieval; and verified memory;
-- `explanation-v1`: incident/deployment context plus runbook-only,
-  semantic-oriented evidence; and
-- `verification-v1`: current structured records plus authoritative runbook
-  corroboration, with an authority/freshness/identifier rerank.
-
-The runtime records the selected policy, source scope, strategy, and limits in
-the execution events, carries the task type into the report, and falls back to
-the bounded investigation policy when planning is unavailable or invalid. The
-tenant filter and read-only authorization remain independent of classification.
+### 3. Retrieval quality and coverage
 
 Still missing:
 
@@ -104,25 +65,35 @@ Still missing:
 - meaningful chunking and evaluation of long runbooks rather than relying
   primarily on one vector per document.
 
-### Cross-cutting contract validation — implemented
+#### What Recall@k and MRR measure
 
-The deployed workflow now validates the structured investigation contract in
-two places. The AgentCore Runtime runs a deterministic gate immediately before
-report publication. Step Functions then invokes the audit Lambda after the
-Runtime returns; the Lambda rereads the durable checkpoint and event history,
-reconstructs the evidence packet, and records a `post_run` audit event.
+These metrics evaluate whether retrieval returns the evidence that an
+investigation needs, and how high that evidence appears in the ranked results.
+They require a benchmark set of representative queries with the relevant,
+authorized evidence identified in advance.
 
-The checks cover task-policy selection, tenant scope, evidence schema, required
-and authorized citations, typed claim references, excluded source scopes,
-memory boundaries, and the read-only tool contract. The website exposes the
-pre-publication gate and post-run audit as timeline stages and displays the
-bounded result in the report and execution log.
+**Recall@k** asks: of all the evidence records marked relevant for a query,
+what fraction appeared in the first *k* results? If a query has four relevant
+records and the top five results include three of them, Recall@5 is 3/4, or
+75%. A higher value means fewer known relevant records were missed within the
+result limit. The benchmark averages this fraction across its queries.
 
-This is deliberately not a Bedrock quality evaluation. It proves that the
-workflow obeyed deterministic structural contracts; it does not judge whether
-an LLM hypothesis is correct. The remaining evaluation gap is to measure
-quality, retrieval accuracy, cost, latency, and recovery across a golden-case
-corpus rather than only validating one run's structure.
+**Mean Reciprocal Rank (MRR)** asks how early the first relevant result
+appears. For each query, score the rank of its first relevant result as
+`1 / rank`: a first result at rank 1 scores 1, at rank 2 scores 1/2, and at
+rank 5 scores 1/5. If no relevant record appears, the query scores 0. MRR is
+the average of these scores across queries, so it rewards putting useful
+evidence near the top.
+
+For LedgerFlow, benchmark queries should have labeled incident, invoice, log,
+deployment, and runbook evidence IDs. Calculate the metrics over the actual
+ranked retrieval output for each task policy, and report results separately by
+policy and source type. Labels and scoring must respect tenant scope: an
+unauthorized cross-tenant record must never count as a relevant hit. Recall@k
+shows coverage at the configured evidence limit; MRR shows ranking quality for
+the earliest useful result. Neither metric alone proves that a report's
+conclusions are correct, so pair them with citation correctness and
+claim-level evaluation.
 
 ### 4. Memory lifecycle and verified-fact management
 
@@ -136,6 +107,19 @@ Still missing:
 - a policy for what may be promoted from an investigation into memory;
 - tests for stale, contradictory, and cross-tenant memories;
 - a seeded memory corpus that is actually exercised by the deployed path.
+
+A future canonical verified-facts ledger should explicitly record provenance and
+lifecycle. The proposed record fields are:
+
+```text
+memory_id, tenant_id, subject_id, fact_key, fact_value, source_ids,
+authority, confidence, observed_at, expires_at, status, supersedes
+```
+
+AgentCore Memory can provide semantic recall, while this ledger should be the
+authoritative source for verified facts, supersession, and expiration. The
+current Runtime does not yet use the verified-facts table as that source of
+truth.
 
 ### 5. Recovery depth
 
@@ -164,6 +148,19 @@ Still missing:
 - cost and latency by workflow stage;
 - recovery success and duplicate-operation rates;
 - a repeatable golden-case benchmark run in CI or a deployment check.
+
+
+The planned benchmark uses 20 investigations covering duplicate invoices,
+payment timeouts, configuration failures, outdated runbooks, cross-tenant
+adversarial documents, superseded memories, prompt-injection tool output,
+incomplete incidents, expired approvals, and simulated worker crashes.
+Measure retrieval Recall@5 and MRR, citation correctness, root-cause accuracy,
+unauthorized-record exclusion, memory freshness, invariant retention, tokens
+per verified report, cache-eligible and cached-token ratios, recovery rate,
+duplicate-operation rate, end-to-end latency, and cost per verified report.
+Use deterministic evaluators for authorization, citations, invariants, recovery,
+and duplicate operations; use AgentCore Evaluations for report completeness,
+reasoning quality, and clarity.
 
 ### 7. Policy enforcement in deployed environments
 
@@ -411,16 +408,14 @@ expiry, and independent execution audit.
 
 ## Suggested learning order
 
-1. ~~Context compaction and invariant preservation~~ — complete.
-2. **Token budgeting and caching** — next.
-3. ~~Task-aware retrieval policies~~ — implemented; iterative retrieval and
-   evaluation remain open sub-gaps.
-4. Memory lifecycle.
-5. Recovery depth.
-6. Adversarial and authorization tests.
-7. Policy enforcement.
-8. Evaluation and benchmarks.
-9. Batch and final production simulation.
-10. Authorized operations and approval safeguards.
+1. **Token budgeting and caching** — next.
+2. Retrieval quality and coverage.
+3. Memory lifecycle.
+4. Recovery depth.
+5. Adversarial and authorization tests.
+6. Policy enforcement.
+7. Evaluation and benchmarks.
+8. Batch and final production simulation.
+9. Authorized operations and approval safeguards.
 
-The tenth gap is deliberately last in the implementation order because it introduces irreversible side effects. The first nine gaps can teach most of the important agent-engineering lessons while preserving the current read-only safety boundary.
+Authorized operations are deliberately last because they introduce irreversible side effects. The preceding topics teach the remaining agent-engineering lessons while preserving the current read-only safety boundary.
