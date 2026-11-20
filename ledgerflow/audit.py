@@ -43,6 +43,10 @@ def _record_id(item: Mapping[str, Any]) -> str:
     if nested:
         return _text(nested).split("#", 1)[0]
     data = item.get("data") if isinstance(item.get("data"), Mapping) else {}
+    nested_metadata = data.get("metadata") if isinstance(data.get("metadata"), Mapping) else {}
+    for key in ("document_id", "source_id", "key"):
+        if nested_metadata.get(key):
+            return _text(nested_metadata[key]).split("#", 1)[0]
     for key in ("IncidentId", "InvoiceId", "LogId", "DeploymentId", "id"):
         if data.get(key):
             return _text(data[key])
@@ -56,6 +60,9 @@ def _tenant_values(item: Mapping[str, Any]) -> list[str]:
         nested = item.get(key)
         if isinstance(nested, Mapping):
             mappings.append(nested)
+            nested_metadata = nested.get("metadata")
+            if isinstance(nested_metadata, Mapping):
+                mappings.append(nested_metadata)
     for mapping in mappings:
         for key in ("TenantId", "tenant_id", "tenantId"):
             if mapping.get(key):
@@ -149,6 +156,8 @@ def audit_investigation(
     claims = report.get("evidence_claims", [])
     if not isinstance(claims, list):
         claims = []
+    if report_ids and not claims:
+        invalid_claims.append({"reason": "report contains evidence but no typed claims"})
     for index, claim in enumerate(claims):
         if not isinstance(claim, Mapping):
             invalid_claims.append({"index": index, "reason": "claim is not an object"})
@@ -157,7 +166,7 @@ def audit_investigation(
         claim_ids = _unique(claim.get("evidence_ids", [])) if isinstance(claim.get("evidence_ids"), list) else []
         invalid_ids = sorted(set(claim_ids) - set(allowed_ids))
         unreported_ids = sorted(set(claim_ids) - set(report_ids))
-        if claim_type not in CLAIM_TYPES or not _text(claim.get("statement")) or invalid_ids or unreported_ids:
+        if claim_type not in CLAIM_TYPES or not _text(claim.get("statement")) or not claim_ids or invalid_ids or unreported_ids:
             invalid_claims.append(
                 {
                     "index": index,
@@ -184,12 +193,24 @@ def audit_investigation(
         "deployment": not policy.include_deployments,
     }
     excluded_observations = sorted(kind for kind, excluded in excluded_sources.items() if excluded and source_counts.get(kind, 0))
+    vector_source_violations: list[dict[str, Any]] = []
+    if policy.vector_source_types:
+        allowed_source_types = set(policy.vector_source_types)
+        for item in evidence_items:
+            if _text(item.get("kind")) != "vector_evidence":
+                continue
+            data = item.get("data") if isinstance(item.get("data"), Mapping) else item
+            metadata = data.get("metadata") if isinstance(data, Mapping) and isinstance(data.get("metadata"), Mapping) else data
+            source_type = _text(metadata.get("source_type")) if isinstance(metadata, Mapping) else ""
+            if source_type not in allowed_source_types:
+                vector_source_violations.append({"id": _record_id(item), "source_type": source_type})
     _check(
         checks,
         "policy_source_scope",
-        not excluded_observations,
+        not excluded_observations and not vector_source_violations,
         source_counts=source_counts,
         excluded_observations=excluded_observations,
+        vector_source_violations=vector_source_violations[:10],
     )
     _check(
         checks,
@@ -201,9 +222,13 @@ def audit_investigation(
 
     tenant_violations: list[dict[str, Any]] = []
     for item in evidence_items:
-        observed_tenants = [value for value in _tenant_values(item) if value != _text(tenant_id)]
+        observed_tenants = [value for value in _tenant_values(item) if value not in {_text(tenant_id), "public"}]
         if observed_tenants:
             tenant_violations.append({"id": _record_id(item), "tenants": observed_tenants})
+    for item in memory_items:
+        observed_tenants = [value for value in _tenant_values(item) if value != _text(tenant_id)]
+        if observed_tenants:
+            tenant_violations.append({"id": _record_id(item), "tenants": observed_tenants, "kind": "memory"})
     _check(
         checks,
         "tenant_scope",
@@ -233,6 +258,20 @@ def audit_investigation(
                 tool_violations.append({"tool": tool, "reason": "retrieval strategy mismatch", "actual": strategy, "expected": policy.strategy})
             if source_types != sorted(policy.vector_source_types):
                 tool_violations.append({"tool": tool, "reason": "retrieval source filter mismatch", "actual": source_types, "expected": sorted(policy.vector_source_types)})
+            result_preview = payload.get("result_preview") if isinstance(payload.get("result_preview"), list) else []
+            if policy.vector_source_types:
+                allowed_source_types = set(policy.vector_source_types)
+                for record in result_preview:
+                    if not isinstance(record, Mapping):
+                        continue
+                    observed_source_type = _text(record.get("source_type"))
+                    if observed_source_type not in allowed_source_types:
+                        tool_violations.append({
+                            "tool": tool,
+                            "reason": "retrieval returned a source outside policy",
+                            "actual": observed_source_type,
+                            "expected": sorted(allowed_source_types),
+                        })
             try:
                 if int(arguments.get("top_k", policy.top_k)) > policy.top_k:
                     tool_violations.append({"tool": tool, "reason": "top_k exceeds policy limit"})

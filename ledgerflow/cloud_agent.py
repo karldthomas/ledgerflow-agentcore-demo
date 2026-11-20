@@ -8,9 +8,12 @@ AgentCore Memory.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import time
-from dataclasses import replace
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -22,6 +25,7 @@ from .context_compaction import (
     ContextCompactor,
     ContextInvariantError,
     ContextSummarizationError,
+    TenantScopeViolation,
 )
 from .evidence_reasoning import build_evidence_report
 from .gateway import AgentCoreGatewayClient
@@ -32,8 +36,27 @@ from .retrieval_policies import RetrievalPolicy, classify_task, policy_for
 
 
 WORKFLOW_STATE_SCHEMA_VERSION = "ledgerflow.workflow.v1"
-WORKFLOW_LEASE_SECONDS = 60
+WORKFLOW_LEASE_SECONDS = 300
+WORKFLOW_CHECKPOINT_MAX_BYTES = 350_000
 DEV_TOOLS_ENVIRONMENTS = {"dev", "test"}
+
+
+@dataclass
+class InvocationContext:
+    """State that must remain isolated for one concurrent runtime request."""
+
+    workflow_id: str
+    tenant_id: str
+    owner: str
+    gateway: Any | None = None
+    failure_injection_consumed: bool = False
+    resumed: bool = False
+
+
+_INVOCATION_CONTEXT: ContextVar[InvocationContext | None] = ContextVar(
+    "ledgerflow_invocation_context",
+    default=None,
+)
 
 
 class WorkflowInProgressError(RuntimeError):
@@ -57,6 +80,7 @@ class CloudInvestigationHandler:
     def __init__(self, *, region: str | None = None) -> None:
         self.region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
         gateway_url = os.environ["AGENTCORE_GATEWAY_URL"]
+        self.gateway_url = gateway_url
         self.gateway = AgentCoreGatewayClient(gateway_url, region=self.region)
         try:
             import boto3
@@ -71,10 +95,6 @@ class CloudInvestigationHandler:
             self.lease_seconds = max(5, int(os.environ.get("WORKFLOW_LEASE_SECONDS", str(WORKFLOW_LEASE_SECONDS))))
         except ValueError:
             self.lease_seconds = WORKFLOW_LEASE_SECONDS
-        self.current_workflow_id: str | None = None
-        self.current_tenant_id: str | None = None
-        self.failure_injection_consumed = False
-        self.resumed = False
         self.reasoner: BedrockReportReasoner | None = None
         self.planner: BedrockInvestigationPlanner | None = None
         try:
@@ -140,9 +160,10 @@ class CloudInvestigationHandler:
         *,
         visibility: str = "operator",
     ) -> None:
-        workflow_id = self.current_workflow_id
-        if not workflow_id:
+        context = _INVOCATION_CONTEXT.get()
+        if context is None or not context.workflow_id:
             return
+        workflow_id = context.workflow_id
         table_name = os.environ.get("WORKFLOW_EVENTS_TABLE")
         if not table_name:
             return
@@ -151,7 +172,7 @@ class CloudInvestigationHandler:
                 Item={
                     "WorkflowId": workflow_id,
                     "EventId": f"{time.time_ns()}#{uuid4().hex}",
-                    "TenantId": self.current_tenant_id if hasattr(self, "current_tenant_id") else "tenant_acme",
+                    "TenantId": context.tenant_id,
                     "EventType": event_type,
                     "Step": step,
                     "Status": status,
@@ -164,6 +185,66 @@ class CloudInvestigationHandler:
         except Exception as exc:
             # Observability must not turn a successful investigation into a failure.
             print(json.dumps({"event": "workflow_event_degraded", "error": str(exc)}))
+
+    def _invocation_owner(self) -> str:
+        context = _INVOCATION_CONTEXT.get()
+        return context.owner if context is not None else getattr(self, "worker_id", "ledgerflow-runtime")
+
+    def _checkpoint_state(self, workflow_id: str, step: str, data: dict[str, Any]) -> str:
+        """Store large replay state outside DynamoDB and persist only a pointer."""
+
+        encoded = json.dumps(data, sort_keys=True, default=str).encode("utf-8")
+        max_bytes = WORKFLOW_CHECKPOINT_MAX_BYTES
+        try:
+            max_bytes = max(64_000, int(os.environ.get("WORKFLOW_CHECKPOINT_MAX_BYTES", str(max_bytes))))
+        except ValueError:
+            pass
+        if len(encoded) <= max_bytes:
+            return encoded.decode("utf-8")
+
+        bucket = os.environ.get("RAW_DATA_BUCKET")
+        if not bucket or getattr(self, "s3", None) is None:
+            raise ValueError("checkpoint state exceeds DynamoDB limit and no checkpoint blob bucket is configured")
+        safe_workflow_id = re.sub(r"[^A-Za-z0-9._:-]", "_", workflow_id)[:128]
+        safe_step = re.sub(r"[^A-Za-z0-9._:-]", "_", step)[:64]
+        key = f"workflow-state/{safe_workflow_id}/{safe_step}-{uuid4().hex}.json"
+        digest = hashlib.sha256(encoded).hexdigest()
+        self.s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=encoded,
+            ContentType="application/json",
+            Metadata={"sha256": digest, "workflow_id": safe_workflow_id, "step": safe_step},
+        )
+        return json.dumps(
+            {
+                "__state_blob__": {
+                    "bucket": bucket,
+                    "key": key,
+                    "sha256": digest,
+                    "bytes": len(encoded),
+                }
+            },
+            sort_keys=True,
+        )
+
+    def _restore_checkpoint_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        pointer = state.get("__state_blob__")
+        if not isinstance(pointer, dict):
+            return state
+        bucket = str(pointer.get("bucket") or "")
+        key = str(pointer.get("key") or "")
+        expected_digest = str(pointer.get("sha256") or "")
+        if not bucket or not key or not expected_digest or getattr(self, "s3", None) is None:
+            raise ValueError("checkpoint state blob pointer is incomplete")
+        body = self.s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        actual_digest = hashlib.sha256(body).hexdigest()
+        if actual_digest != expected_digest:
+            raise ValueError("checkpoint state blob integrity check failed")
+        restored = json.loads(body.decode("utf-8"))
+        if not isinstance(restored, dict):
+            raise ValueError("checkpoint state blob must contain an object")
+        return restored
 
     def _planner_event(self, event: dict[str, Any]) -> None:
         # Keep the prompt version and bounded dynamic variables in the admin
@@ -251,6 +332,8 @@ class CloudInvestigationHandler:
         if not isinstance(state, dict):
             state = {}
         schema_version = str(item.get("StateSchemaVersion", ""))
+        if schema_version == WORKFLOW_STATE_SCHEMA_VERSION:
+            state = self._restore_checkpoint_state(state)
         return {
             "item": item,
             "state": state if schema_version == WORKFLOW_STATE_SCHEMA_VERSION else {},
@@ -269,7 +352,7 @@ class CloudInvestigationHandler:
         if not table_name:
             return
         now = int(time.time())
-        owner = getattr(self, "worker_id", "ledgerflow-runtime")
+        owner = self._invocation_owner()
         try:
             self.dynamodb.Table(table_name).update_item(
                 Key={"WorkflowId": workflow_id},
@@ -307,12 +390,36 @@ class CloudInvestigationHandler:
             self.dynamodb.Table(table_name).update_item(
                 Key={"WorkflowId": workflow_id},
                 UpdateExpression="REMOVE LeaseOwner, LeaseExpiresAt",
-                ExpressionAttributeValues={":owner": getattr(self, "worker_id", "ledgerflow-runtime")},
+                ExpressionAttributeValues={":owner": self._invocation_owner()},
                 ConditionExpression="LeaseOwner = :owner",
             )
         except Exception as exc:
             if not self._is_conditional_failure(exc):
                 print(json.dumps({"event": "workflow_lease_release_degraded", "error": str(exc)}))
+
+    def _renew_workflow_lease(self, workflow_id: str) -> None:
+        """Refresh a live lease around calls that can outlast one lease period."""
+
+        table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
+        if not table_name:
+            return
+        now = int(time.time())
+        try:
+            self.dynamodb.Table(table_name).update_item(
+                Key={"WorkflowId": workflow_id},
+                UpdateExpression="SET LeaseExpiresAt = :expires, UpdatedAt = :updated",
+                ExpressionAttributeValues={
+                    ":owner": self._invocation_owner(),
+                    ":expires": now + int(getattr(self, "lease_seconds", WORKFLOW_LEASE_SECONDS)),
+                    ":updated": datetime.now(timezone.utc).isoformat(),
+                    ":lease_now": now,
+                },
+                ConditionExpression="LeaseOwner = :owner AND LeaseExpiresAt >= :lease_now",
+            )
+        except Exception as exc:
+            if self._is_conditional_failure(exc):
+                raise WorkflowInProgressError(f"workflow {workflow_id} lease is no longer owned") from exc
+            raise
 
     def _checkpoint(
         self,
@@ -326,18 +433,21 @@ class CloudInvestigationHandler:
         status: str = "RUNNING",
     ) -> None:
         table_name = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE")
+        context = _INVOCATION_CONTEXT.get()
         inject_failure = bool(
             failure_after_step
             and failure_after_step == step
-            and not getattr(self, "failure_injection_consumed", False)
+            and not (context.failure_injection_consumed if context is not None else False)
         )
         failure_source = "payload" if inject_failure else ""
         failure_control_id: str | None = None
         if inject_failure:
-            self.failure_injection_consumed = True
+            if context is not None:
+                context.failure_injection_consumed = True
         if table_name:
             now = datetime.now(timezone.utc).isoformat()
             lease_expires = int(time.time()) + int(getattr(self, "lease_seconds", WORKFLOW_LEASE_SECONDS))
+            checkpoint_data = self._checkpoint_state(workflow_id, step, data)
             self.dynamodb.Table(table_name).update_item(
                 Key={"WorkflowId": workflow_id},
                 UpdateExpression=(
@@ -350,17 +460,17 @@ class CloudInvestigationHandler:
                 ExpressionAttributeNames={"#data": "Data", "#status": "Status", "#version": "CheckpointVersion"},
                 ExpressionAttributeValues={
                     ":customer": customer_id,
-                    ":tenant": self.current_tenant_id or "tenant_acme",
+                    ":tenant": context.tenant_id if context is not None else "",
                     ":step": step,
-                    ":data": json.dumps(data, sort_keys=True, default=str),
+                    ":data": checkpoint_data,
                     ":completed": sorted(completed_steps),
                     ":schema": WORKFLOW_STATE_SCHEMA_VERSION,
                     ":status": status,
                     ":zero": 0,
                     ":one": 1,
-                    ":failure_consumed": bool(getattr(self, "failure_injection_consumed", False)),
+                    ":failure_consumed": bool(context.failure_injection_consumed if context is not None else False),
                     ":updated": now,
-                    ":owner": getattr(self, "worker_id", "ledgerflow-runtime"),
+                    ":owner": self._invocation_owner(),
                     ":lease_expires": lease_expires,
                     ":lease_now": int(time.time()),
                 },
@@ -372,8 +482,8 @@ class CloudInvestigationHandler:
                 "completed",
                 {
                     "completed_steps": sorted(completed_steps),
-                    "resumed": bool(getattr(self, "resumed", False)),
-                    "failure_injection_consumed": bool(getattr(self, "failure_injection_consumed", False)),
+                    "resumed": bool(context.resumed if context is not None else False),
+                    "failure_injection_consumed": bool(context.failure_injection_consumed if context is not None else False),
                 },
             )
             if not inject_failure:
@@ -382,7 +492,8 @@ class CloudInvestigationHandler:
                     inject_failure = True
                     failure_source = "dev_tools"
                     failure_control_id = str(dynamic_plan.get("ControlId") or "")
-                    self.failure_injection_consumed = True
+                    if context is not None:
+                        context.failure_injection_consumed = True
         if inject_failure:
             self._emit(
                 "failure_injection",
@@ -466,7 +577,7 @@ class CloudInvestigationHandler:
                         ":false": False,
                         ":enabled": True,
                         ":now": now,
-                        ":worker": self.worker_id,
+                        ":worker": self._invocation_owner(),
                         ":updated": datetime.now(timezone.utc).isoformat(),
                     },
                 )
@@ -612,7 +723,15 @@ class CloudInvestigationHandler:
         self._emit("tool_call", tool, "started", {"target": target, "tool": tool, "arguments": payload})
         started = time.perf_counter()
         try:
-            items = self._items(self.gateway.call_tool(f"{target}___{tool}", payload))
+            context = _INVOCATION_CONTEXT.get()
+            gateway = context.gateway if context is not None else getattr(self, "gateway", None)
+            if gateway is None:
+                raise RuntimeError("AgentCore Gateway client is not configured")
+            if context is not None:
+                self._renew_workflow_lease(context.workflow_id)
+            items = self._items(gateway.call_tool(f"{target}___{tool}", payload))
+            if context is not None:
+                self._renew_workflow_lease(context.workflow_id)
         except Exception as exc:
             self._emit(
                 "tool_call",
@@ -679,6 +798,9 @@ class CloudInvestigationHandler:
         return normalized, policy
 
     def _plan(self, payload: dict[str, Any]) -> InvestigationPlan:
+        context = _INVOCATION_CONTEXT.get()
+        if context is not None:
+            self._renew_workflow_lease(context.workflow_id)
         if self.planner is None:
             plan = self._default_plan(payload)
             self._emit(
@@ -725,6 +847,7 @@ class CloudInvestigationHandler:
     ) -> tuple[CompactedContext | None, str | None]:
         """Build deterministic context, then optionally add LLM semantics."""
 
+        self._renew_workflow_lease(workflow_id)
         compactor = getattr(self, "context_compactor", None)
         if compactor is None:
             compactor = ContextCompactor(max_tokens=8000)
@@ -754,6 +877,14 @@ class CloudInvestigationHandler:
                     "plan": plan.to_dict(),
                 },
             )
+        except TenantScopeViolation as exc:
+            self._emit(
+                "context_compaction",
+                "context_compaction",
+                "failed",
+                {"mode": "deterministic", "error": str(exc), "fallback_used": False, "tenant_scope_violation": True},
+            )
+            raise
         except ContextInvariantError as exc:
             self._emit(
                 "context_compaction",
@@ -803,11 +934,16 @@ class CloudInvestigationHandler:
         if not memory_id:
             return []
         try:
+            context = _INVOCATION_CONTEXT.get()
+            if context is not None:
+                self._renew_workflow_lease(context.workflow_id)
             response = self.memory.retrieve_memory_records(
                 memoryId=memory_id,
                 namespacePath=f"/verified/{tenant_id}/{subject_id}/",
                 searchCriteria={"searchQuery": query, "topK": 5},
             )
+            if context is not None:
+                self._renew_workflow_lease(context.workflow_id)
             return list(response.get("memoryRecordSummaries", []))
         except Exception as exc:
             # Memory should enrich an investigation; a transient memory read
@@ -820,6 +956,9 @@ class CloudInvestigationHandler:
         if not memory_id:
             return
         try:
+            context = _INVOCATION_CONTEXT.get()
+            if context is not None:
+                self._renew_workflow_lease(context.workflow_id)
             self.memory.create_event(
                 memoryId=memory_id,
                 actorId=f"tenant:{tenant_id}",
@@ -836,44 +975,104 @@ class CloudInvestigationHandler:
         table_name = os.environ.get("OPERATION_LEDGER_TABLE")
         if not table_name:
             return report
+        self._renew_workflow_lease(workflow_id)
         table = self.dynamodb.Table(table_name)
         operation_id = f"report:{workflow_id}"
+        now_epoch = int(time.time())
+        owner = self._invocation_owner()
         try:
             table.put_item(
-                Item={"OperationId": operation_id, "WorkflowId": workflow_id, "OperationType": "publish_report", "Status": "STARTED"},
+                Item={
+                    "OperationId": operation_id,
+                    "WorkflowId": workflow_id,
+                    "OperationType": "publish_report",
+                    "Status": "STARTED",
+                    "Owner": owner,
+                    "StartedAt": datetime.now(timezone.utc).isoformat(),
+                    "ExpiresAtEpoch": now_epoch + int(getattr(self, "lease_seconds", WORKFLOW_LEASE_SECONDS)),
+                },
                 ConditionExpression="attribute_not_exists(OperationId)",
             )
         except Exception as exc:
-            try:
-                from botocore.exceptions import ClientError
-            except ImportError:
-                ClientError = ()  # type: ignore[assignment]
-            if ClientError and isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            if not self._is_conditional_failure(exc):
                 raise
             existing = table.get_item(Key={"OperationId": operation_id}).get("Item", {})
             if existing.get("Status") == "SUCCEEDED" and existing.get("ResultJson"):
                 return IncidentReport(**json.loads(existing["ResultJson"]))
-            # A prior worker may have died after the write began. Reusing the
-            # same operation ID makes the subsequent completion deterministic.
-        table.update_item(
-            Key={"OperationId": operation_id},
-            UpdateExpression="SET #status = :status, ResultJson = :result, CompletedAt = :completed",
-            ExpressionAttributeNames={"#status": "Status"},
-            ExpressionAttributeValues={
-                ":status": "SUCCEEDED",
-                ":result": json.dumps(report.to_dict(), sort_keys=True),
-                ":completed": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+            existing_owner = str(existing.get("Owner") or "")
+            try:
+                existing_expiry = int(existing.get("ExpiresAtEpoch", 0) or 0)
+            except (TypeError, ValueError):
+                existing_expiry = 0
+            if existing_owner and existing_owner != owner and existing_expiry > now_epoch:
+                raise WorkflowInProgressError(f"operation {operation_id} is being published by another worker")
+            # A prior worker may have died after the lease write began. Only an
+            # expired or owner-matched operation may be completed by this worker.
+        try:
+            table.update_item(
+                Key={"OperationId": operation_id},
+                UpdateExpression=(
+                    "SET #status = :status, ResultJson = :result, CompletedAt = :completed, "
+                    "Owner = :owner, ExpiresAtEpoch = :ttl"
+                ),
+                ExpressionAttributeNames={"#status": "Status"},
+                ExpressionAttributeValues={
+                    ":started": "STARTED",
+                    ":status": "SUCCEEDED",
+                    ":result": json.dumps(report.to_dict(), sort_keys=True),
+                    ":completed": datetime.now(timezone.utc).isoformat(),
+                    ":owner": owner,
+                    ":ttl": now_epoch + (30 * 24 * 60 * 60),
+                    ":now": now_epoch,
+                },
+                ConditionExpression=(
+                    "#status = :started AND "
+                    "(attribute_not_exists(Owner) OR Owner = :owner OR "
+                    "attribute_not_exists(ExpiresAtEpoch) OR ExpiresAtEpoch < :now)"
+                ),
+            )
+        except Exception as exc:
+            if self._is_conditional_failure(exc):
+                existing = table.get_item(Key={"OperationId": operation_id}).get("Item", {})
+                if existing.get("Status") == "SUCCEEDED" and existing.get("ResultJson"):
+                    return IncidentReport(**json.loads(existing["ResultJson"]))
+                raise WorkflowInProgressError(f"operation {operation_id} is being published by another worker") from exc
+            raise
         return report
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        customer_id = str(payload["customer_id"])
-        tenant_id = str(payload.get("tenant_id", "tenant_acme"))
-        workflow_id = str(payload.get("workflow_id") or f"runtime-{customer_id}")
+        customer_id = str(payload.get("customer_id") or "").strip()
+        if not customer_id:
+            raise ValueError("customer_id is required")
+        tenant_id = str(payload.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise PermissionError("tenant_id is required")
+        workflow_id = str(payload.get("workflow_id") or f"runtime-{customer_id}").strip()
+        context = InvocationContext(
+            workflow_id=workflow_id,
+            tenant_id=tenant_id,
+            owner=f"{getattr(self, 'worker_id', 'ledgerflow-runtime')}:{uuid4().hex}",
+        )
+        gateway_url = str(getattr(self, "gateway_url", "") or "").strip()
+        context.gateway = (
+            AgentCoreGatewayClient(gateway_url, region=getattr(self, "region", None))
+            if gateway_url
+            else getattr(self, "gateway", None)
+        )
+        token = _INVOCATION_CONTEXT.set(context)
+        try:
+            return self._handle(payload)
+        finally:
+            _INVOCATION_CONTEXT.reset(token)
+
+    def _handle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        context = _INVOCATION_CONTEXT.get()
+        if context is None:
+            raise RuntimeError("workflow invocation context is not initialized")
+        customer_id = str(payload.get("customer_id") or "").strip()
+        tenant_id = context.tenant_id
+        workflow_id = context.workflow_id
         failure_after_step = self._failure_after_step(payload)
-        self.current_workflow_id = workflow_id
-        self.current_tenant_id = tenant_id
         checkpoint = self._load_checkpoint(workflow_id)
         if checkpoint:
             item = checkpoint["item"]
@@ -888,8 +1087,8 @@ class CloudInvestigationHandler:
                 self._emit("workflow", "investigation", "reused", {"reason": "completed_checkpoint"})
                 return report.to_dict()
 
-        self.failure_injection_consumed = bool(checkpoint and checkpoint["failure_injection_consumed"])
-        self.resumed = bool(checkpoint and checkpoint["completed_steps"])
+        context.failure_injection_consumed = bool(checkpoint and checkpoint["failure_injection_consumed"])
+        context.resumed = bool(checkpoint and checkpoint["completed_steps"])
         self._acquire_workflow_lease(workflow_id, customer_id, tenant_id)
 
         state = dict(checkpoint["state"]) if checkpoint else {}
@@ -1096,6 +1295,7 @@ class CloudInvestigationHandler:
                     )
                 if self.reasoner is not None and context is not None:
                     try:
+                        self._renew_workflow_lease(workflow_id)
                         report = self.reasoner.synthesize(
                             report,
                             evidence=packet,
@@ -1110,6 +1310,7 @@ class CloudInvestigationHandler:
                                 "plan": plan.to_dict(),
                             },
                         )
+                        self._renew_workflow_lease(workflow_id)
                     except ModelReasoningError as exc:
                         print(json.dumps({"event": "model_reasoning_degraded", "error": str(exc)}))
                         self._emit(

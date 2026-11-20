@@ -16,7 +16,7 @@
     {"Key": "ContextCompactionPromptArn", "Value": "${CF_OUT_ContextCompactionPromptArn}"},
     {"Key": "ContextCompactionPromptDefaultVersionArn", "Value": "${CF_OUT_ContextCompactionPromptVersionArn}"},
     {"Key": "BootstrapAdminEmail", "Value": "${BOOTSTRAP_ADMIN_EMAIL}", "Default": ""},
-    {"Key": "BootstrapAdminTenantId", "Value": "${BOOTSTRAP_ADMIN_TENANT_ID}", "Default": "tenant_acme"},
+    {"Key": "BootstrapAdminTenantId", "Value": "${BOOTSTRAP_ADMIN_TENANT_ID}", "Default": ""},
     {"Key": "AllowedOrigin", "Value": "${ALLOWED_ORIGIN}", "Default": "*"}
   ]
 }

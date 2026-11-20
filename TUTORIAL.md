@@ -217,14 +217,12 @@ The policy decision is independent of the model’s classification. If a prompt
 injection says that restrictions have been removed, the policy remains
 unchanged.
 
-The CloudFormation defaults use `LOG_ONLY` for Gateway and policy
-enforcement so a deployment can inspect decisions before enabling blocking
-behavior. The Lambda tool handlers still enforce tenant scope and the
-read-only contract in application code. After the deny paths have been tested,
-the deployment can promote both controls with
-`GatewayPolicyMode=ENFORCE` and
-`PolicyEnforcementMode=ACTIVE`. Logging is telemetry; it is not a
-substitute for enforcement.
+The CloudFormation defaults use `ENFORCE` for Gateway policy mode and `ACTIVE`
+for policy enforcement. The Lambda tool handlers independently enforce tenant
+scope and the read-only contract in application code. A controlled rollout can
+explicitly select `GatewayPolicyMode=LOG_ONLY` and
+`PolicyEnforcementMode=LOG_ONLY`, but logging is telemetry, not a substitute
+for enforcement.
 
 ### AgentCore Identity
 

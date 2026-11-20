@@ -1,10 +1,10 @@
 """Bedrock report synthesis with a strict evidence boundary.
 
 When ``MODEL_REASONING_ENABLED=ENABLED`` and ``MODEL_ID`` is set, this module
-uses Bedrock Converse to improve the wording of a report already grounded by
-the read-only workflow. The deterministic evidence report remains the safe
-fallback when model synthesis is unavailable. The model never chooses tools,
-tenants, permissions, or durable state.
+uses Bedrock Converse to validate and enrich structured citations for a report
+already grounded by the read-only workflow. The deterministic evidence report
+remains authoritative for all user-visible narrative fields. The model never
+chooses tools, tenants, permissions, or durable state.
 """
 
 from __future__ import annotations
@@ -25,26 +25,6 @@ from .prompting import PromptVersionResolver
 
 class ModelReasoningError(RuntimeError):
     """Raised when a model response cannot be converted into a safe report."""
-
-
-def _as_text(value: Any, fallback: str) -> str:
-    return str(value).strip() if isinstance(value, str) and value.strip() else fallback
-
-
-def _as_list(value: Any, fallback: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        return list(fallback)
-    result = [str(item).strip() for item in value if str(item).strip()]
-    return result or list(fallback)
-
-
-def _safe_actions(value: Any, fallback: list[str]) -> list[str]:
-    """Keep model recommendations advisory and exclude financial mutations."""
-
-    blocked = ("refund", "cancel", "delete", "charge", "credit", "modify", "write")
-    actions = _as_list(value, fallback)
-    safe = [action for action in actions if not any(word in action.lower() for word in blocked)]
-    return safe or list(fallback)
 
 
 def _safe_claims(value: Any, allowed_ids: set[str], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -230,17 +210,20 @@ class BedrockReportReasoner:
         return IncidentReport(
             incident_id=base_report.incident_id,
             customer_id=base_report.customer_id,
-            root_cause=_as_text(candidate.get("root_cause"), base_report.root_cause or "Evidence was insufficient."),
             evidence_ids=evidence_ids,
             confidence=confidence,
-            recommended_actions=_safe_actions(candidate.get("recommended_actions"), base_report.recommended_actions),
-            unresolved_questions=_as_list(candidate.get("unresolved_questions"), base_report.unresolved_questions),
-            executive_summary=_as_text(candidate.get("executive_summary"), base_report.executive_summary),
+            # Narrative fields stay deterministic until the model supplies a
+            # field-level claim envelope. A single top-level evidence_ids list
+            # cannot prove which sentence or recommendation it supports.
+            root_cause=base_report.root_cause or "Evidence was insufficient.",
+            recommended_actions=list(base_report.recommended_actions),
+            unresolved_questions=list(base_report.unresolved_questions),
+            executive_summary=base_report.executive_summary,
             affected_scope=base_report.affected_scope,
-            incident_timeline=_as_list(candidate.get("incident_timeline"), base_report.incident_timeline),
-            verified_findings=_as_list(candidate.get("verified_findings"), base_report.verified_findings),
+            incident_timeline=list(base_report.incident_timeline),
+            verified_findings=list(base_report.verified_findings),
             recovery_history=base_report.recovery_history,
-            remaining_risks=_as_list(candidate.get("remaining_risks"), base_report.remaining_risks),
+            remaining_risks=list(base_report.remaining_risks),
             task_type=base_report.task_type,
             evidence_schema_version=base_report.evidence_schema_version,
             evidence_claims=_safe_claims(candidate.get("evidence_claims"), allowed_ids, base_report.evidence_claims),

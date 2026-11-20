@@ -167,7 +167,7 @@ Still missing:
 
 ### 7. Policy enforcement in deployed environments
 
-The backend tools enforce a read-only, tenant-scoped boundary, but the deployed development configuration currently uses `LOG_ONLY` for Gateway and policy enforcement. That observes decisions without blocking them.
+The backend tools enforce a read-only, tenant-scoped boundary, and the CloudFormation defaults now use `ENFORCE` for Gateway policy mode and `ACTIVE` for policy enforcement. Deployments may still explicitly select `LOG_ONLY` during a controlled rollout.
 
 Still missing:
 

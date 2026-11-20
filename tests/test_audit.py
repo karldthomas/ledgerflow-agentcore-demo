@@ -7,7 +7,7 @@ def _case() -> dict[str, object]:
     evidence = [
         {"id": "INC-1042", "kind": "incident", "data": {"IncidentId": "INC-1042", "CustomerId": "ACME-482", "TenantId": "tenant_acme"}},
         {"id": "INV-8821", "kind": "invoice", "data": {"InvoiceId": "INV-8821", "CustomerId": "ACME-482", "TenantId": "tenant_acme"}},
-        {"id": "RUNBOOK-014", "kind": "vector_evidence", "data": {"metadata": {"source_id": "RUNBOOK-014", "tenant_id": "public"}}},
+        {"id": "RUNBOOK-014", "kind": "vector_evidence", "data": {"metadata": {"source_id": "RUNBOOK-014", "tenant_id": "public", "source_type": "runbook"}}},
     ]
     return {
         "workflow_id": "audit-1",
@@ -52,3 +52,25 @@ def test_audit_rejects_unauthorized_citations_and_policy_memory_use():
     assert "evidence_set" in result["failed_checks"]
     assert "claim_citations" in result["failed_checks"]
     assert "memory_boundary" in result["failed_checks"]
+
+
+def test_audit_rejects_nested_vector_tenant_and_uncited_claims():
+    case = _case()
+    case["evidence"] = [
+        *case["evidence"],
+        {
+            "id": "OTHER-DOC",
+            "kind": "vector_evidence",
+            "data": {"metadata": {"document_id": "OTHER-DOC", "tenant_id": "tenant_other", "source_type": "runbook"}},
+        },
+    ]
+    case["report"]["evidence_ids"] = ["INC-1042", "INV-8821", "RUNBOOK-014", "OTHER-DOC"]
+    case["report"]["evidence_claims"] = [
+        {"type": "fact", "statement": "Uncited finding", "evidence_ids": []},
+    ]
+
+    result = audit_investigation(**case)
+
+    assert result["passed"] is False
+    assert "tenant_scope" in result["failed_checks"]
+    assert "claim_citations" in result["failed_checks"]

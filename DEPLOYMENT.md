@@ -649,6 +649,7 @@ ContextCompactionLlmEnabled = ${CONTEXT_COMPACTION_LLM_ENABLED} (default ENABLED
 ContextTokenBudget = ${CONTEXT_TOKEN_BUDGET} (default 8000)
 ContextCompactionReservedTokens = ${CONTEXT_COMPACTION_RESERVED_TOKENS} (default 1200)
 EvidenceLogLimit = ${EVIDENCE_LOG_LIMIT} (default 500; maximum 500)
+WorkflowLeaseSeconds = ${WORKFLOW_LEASE_SECONDS} (default 300; Runtime renews the lease around long-running stages)
 FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED; legacy direct-payload compatibility guard)
 RuntimeExecutionRoleArn = ${CF_OUT_RuntimeExecutionRoleArn}
 GatewayExecutionRoleArn = ${CF_OUT_GatewayExecutionRoleArn}
@@ -690,11 +691,11 @@ SynthesisPromptArn
 SynthesisPromptVersionArn
 ```
 
-The JSON configuration defaults the Gateway and Policy to `LOG_ONLY`, and the
-Runtime model-synthesis switch to `DISABLED`. After authorization tests pass,
-optionally enable model synthesis with a model approved in the account, then
-update the Gateway and Policy modes with
-`--set GatewayPolicyMode=ENFORCE --set PolicyEnforcementMode=ACTIVE`.
+The JSON configuration defaults the Gateway to `ENFORCE` and the Policy to
+`ACTIVE`; the Runtime model-synthesis switch remains `DISABLED`. A controlled
+rollout may explicitly select both `LOG_ONLY` values, and should return to
+`--set GatewayPolicyMode=ENFORCE --set PolicyEnforcementMode=ACTIVE` after
+authorization tests pass.
 
 The Runtime calls Bedrock Converse with the selected prompt-version ARN as
 `modelId` and supplies only the `input` prompt variable. The fixed instructions,
@@ -1015,12 +1016,13 @@ confirm:
 
 ### Step 6 — Deploy AgentCore
 
-Deploy Stack 04 with the JSON default `LOG_ONLY` policy mode. Invoke the Runtime
-with a test session and confirm that tool calls, memory calls, and Runtime
-traces appear.
+Deploy Stack 04 with the enforced JSON policy defaults. Invoke the Runtime with
+a test session and confirm that tool calls, memory calls, and Runtime traces
+appear.
 
-Run the policy regression suite. Change the configuration to `ENFORCE` only
-after expected allow and deny decisions are verified:
+Run the policy regression suite. If a controlled observation-only rollout is
+required, select `LOG_ONLY`; restore the enforced defaults after expected allow
+and deny decisions are verified:
 
 ```bash
 python3 cloudformation/sam_deploy.py --environment dev --region "$AWS_REGION" \
@@ -1262,7 +1264,7 @@ production until the cleanup process is proven.
 - [ ] S3 Vectors index is `ENHANCED` and full-text fields are `ACTIVE`.
 - [ ] Runtime image is referenced by immutable digest.
 - [ ] If enabled, model synthesis returns valid report JSON and only citations from the evidence packet.
-- [ ] Gateway policies pass in `LOG_ONLY` before `ENFORCE`/`ACTIVE`.
+- [ ] Gateway policies pass in enforced `ENFORCE`/`ACTIVE` mode (or an explicitly documented observation-only rollout is active).
 - [ ] ACME-482 baseline smoke test passes.
 - [ ] At least one expanded synthetic case, such as ACME-487 / INC-1050, passes.
 - [ ] ACME-496 / INC-1059 shows context pressure with selected, full,

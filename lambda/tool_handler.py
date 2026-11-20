@@ -24,6 +24,23 @@ def _table(name: str):
     return dynamodb.Table(os.environ[name])
 
 
+def _trusted_tenant(event: dict[str, Any]) -> str:
+    """Read a tenant assertion from an authorizer/Gateway context when present."""
+
+    request_context = event.get("requestContext") if isinstance(event.get("requestContext"), dict) else {}
+    authorizer = request_context.get("authorizer") if isinstance(request_context.get("authorizer"), dict) else {}
+    jwt_claims = authorizer.get("jwt", {}).get("claims", {}) if isinstance(authorizer.get("jwt"), dict) else {}
+    candidates = (
+        event.get("trusted_tenant_id"),
+        event.get("caller_tenant_id"),
+        authorizer.get("tenant_id"),
+        authorizer.get("custom:tenant_id"),
+        jwt_claims.get("tenant_id") if isinstance(jwt_claims, dict) else None,
+        jwt_claims.get("custom:tenant_id") if isinstance(jwt_claims, dict) else None,
+    )
+    return next((str(value).strip() for value in candidates if str(value or "").strip()), "")
+
+
 def _arguments(event: dict[str, Any]) -> dict[str, Any]:
     arguments = event.get("arguments") or event.get("parameters") or event.get("input") or event
     if isinstance(arguments, str):
@@ -36,12 +53,18 @@ def _arguments(event: dict[str, Any]) -> dict[str, Any]:
             pass
     if not isinstance(arguments, dict):
         raise ValueError("tool arguments must be an object")
-    headers = event.get("headers", {}) or {}
-    tenant_id = arguments.get("tenant_id") or headers.get("x-tenant-id") or headers.get("X-Tenant-Id")
+    trusted_tenant = _trusted_tenant(event)
+    tenant_id = str(arguments.get("tenant_id") or "").strip()
+    if trusted_tenant and tenant_id and trusted_tenant != tenant_id:
+        raise PermissionError("tenant_id does not match the authenticated tenant")
+    if not tenant_id:
+        tenant_id = trusted_tenant
     if not tenant_id:
         raise PermissionError("tenant_id is required")
+    if os.environ.get("REQUIRE_TRUSTED_TENANT_CONTEXT", "DISABLED").upper() == "ENABLED" and not trusted_tenant:
+        raise PermissionError("authenticated tenant context is required")
     result = dict(arguments)
-    result["tenant_id"] = str(tenant_id)
+    result["tenant_id"] = tenant_id
     return result
 
 
@@ -56,16 +79,18 @@ def _json_safe(value: Any) -> Any:
 
 
 def _customer_tenant(customer_id: str) -> str | None:
-    table = _table("CUSTOMERS_TABLE") if os.environ.get("CUSTOMERS_TABLE") else None
-    if table is None:
-        return None
+    if not os.environ.get("CUSTOMERS_TABLE"):
+        raise RuntimeError("customer authorization storage is not configured")
+    table = _table("CUSTOMERS_TABLE")
     item = table.get_item(Key={"CustomerId": customer_id}).get("Item")
-    return item.get("TenantId") if item else None
+    if not item or not str(item.get("TenantId") or "").strip():
+        raise PermissionError("customer authorization record was not found")
+    return str(item["TenantId"])
 
 
 def _authorize_customer(customer_id: str, tenant_id: str) -> None:
     owner = _customer_tenant(customer_id)
-    if owner is not None and owner != tenant_id:
+    if owner != tenant_id:
         raise PermissionError("customer is outside tenant scope")
 
 
@@ -76,44 +101,95 @@ def _business_response(items: list[dict[str, Any]]) -> dict[str, Any]:
 def search_incidents(arguments: dict[str, Any]) -> dict[str, Any]:
     tenant_id = arguments["tenant_id"]
     query = str(arguments.get("query", "")).lower()
-    response = _table("INCIDENTS_TABLE").scan()
+    table = _table("INCIDENTS_TABLE")
     items = []
-    for item in response.get("Items", []):
-        if item.get("TenantId") != tenant_id:
-            continue
-        haystack = json.dumps(item, default=str).lower()
-        if query and query not in haystack:
-            continue
-        items.append(item)
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {}
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = table.scan(**params)
+        for item in response.get("Items", []):
+            if item.get("TenantId") != tenant_id:
+                continue
+            haystack = json.dumps(item, default=str).lower()
+            if query and query not in haystack:
+                continue
+            items.append(item)
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     return _business_response(items)
 
 
 def get_customer_invoices(arguments: dict[str, Any]) -> dict[str, Any]:
     customer_id = str(arguments["customer_id"])
     _authorize_customer(customer_id, arguments["tenant_id"])
-    response = _table("INVOICES_TABLE").query(
-        IndexName="CustomerRenewalIndex",
-        KeyConditionExpression=Key("CustomerId").eq(customer_id),
-    )
-    return _business_response([item for item in response.get("Items", []) if item.get("TenantId") == arguments["tenant_id"]])
+    table = _table("INVOICES_TABLE")
+    items: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {
+            "IndexName": "CustomerRenewalIndex",
+            "KeyConditionExpression": Key("CustomerId").eq(customer_id),
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = table.query(**params)
+        items.extend(item for item in response.get("Items", []) if item.get("TenantId") == arguments["tenant_id"])
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
+    return _business_response(items)
 
 
 def get_application_logs(arguments: dict[str, Any]) -> dict[str, Any]:
     customer_id = str(arguments["customer_id"])
     _authorize_customer(customer_id, arguments["tenant_id"])
-    response = _table("APPLICATION_LOGS_TABLE").query(
-        IndexName="CustomerTimestampIndex",
-        KeyConditionExpression=Key("CustomerId").eq(customer_id),
-        ScanIndexForward=True,
-        Limit=min(int(arguments.get("limit", 100)), 500),
-    )
-    return _business_response([item for item in response.get("Items", []) if item.get("TenantId") == arguments["tenant_id"]])
+    try:
+        requested_limit = max(1, min(int(arguments.get("limit", 100)), 500))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("limit must be an integer between 1 and 500") from exc
+    table = _table("APPLICATION_LOGS_TABLE")
+    items: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {
+            "IndexName": "CustomerTimestampIndex",
+            "KeyConditionExpression": Key("CustomerId").eq(customer_id),
+            "ScanIndexForward": True,
+            "Limit": min(requested_limit, 500),
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = table.query(**params)
+        items.extend(item for item in response.get("Items", []) if item.get("TenantId") == arguments["tenant_id"])
+        if len(items) >= requested_limit:
+            break
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
+    return _business_response(items[:requested_limit])
 
 
 def get_deployments(arguments: dict[str, Any]) -> dict[str, Any]:
     tenant_id = arguments["tenant_id"]
-    response = _table("DEPLOYMENTS_TABLE").scan()
-    items = [item for item in response.get("Items", []) if item.get("TenantId") == tenant_id]
+    table = _table("DEPLOYMENTS_TABLE")
+    items: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {}
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = table.scan(**params)
+        items.extend(item for item in response.get("Items", []) if item.get("TenantId") == tenant_id)
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     if arguments.get("version"):
         items = [item for item in items if item.get("Version") == arguments["version"]]
     return _business_response(items)
@@ -182,7 +258,10 @@ def search_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
     strategy = str(arguments.get("strategy", "hybrid")).strip().lower()
     if strategy not in {"hybrid", "semantic", "authoritative"}:
         strategy = "hybrid"
-    top_k = min(int(arguments.get("top_k", 8)), 100)
+    try:
+        top_k = max(1, min(int(arguments.get("top_k", 8)), 100))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("top_k must be an integer between 1 and 100") from exc
     source_types = {
         str(value).strip().lower()
         for value in arguments.get("source_types", [])
@@ -206,6 +285,11 @@ def search_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
     query_args["filter"] = {"$or": [{"tenant_id": tenant_id}, {"tenant_id": "public"}]}
     response = s3vectors.query_vectors(**query_args)
     vectors = _rerank_evidence(response.get("vectors", []), query, strategy)
+    vectors = [
+        item
+        for item in vectors
+        if str(((item.get("metadata") or {}).get("tenant_id")) or "").strip() in {tenant_id, "public"}
+    ]
     if source_types:
         vectors = [
             item

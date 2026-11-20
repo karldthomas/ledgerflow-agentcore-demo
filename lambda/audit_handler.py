@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ CHECKPOINTS_TABLE_NAME = os.environ.get("WORKFLOW_CHECKPOINTS_TABLE", "")
 EVENTS_TABLE_NAME = os.environ.get("WORKFLOW_EVENTS_TABLE", "")
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
+s3 = boto3.client("s3", region_name=REGION)
 
 
 def _state(checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -28,7 +30,21 @@ def _state(checkpoint: dict[str, Any]) -> dict[str, Any]:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, json.JSONDecodeError):
         value = {}
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    pointer = value.get("__state_blob__")
+    if not isinstance(pointer, dict):
+        return value
+    bucket = str(pointer.get("bucket") or "")
+    key = str(pointer.get("key") or "")
+    expected_digest = str(pointer.get("sha256") or "")
+    if not bucket or not key or not expected_digest:
+        raise ValueError("checkpoint state blob pointer is incomplete")
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    if hashlib.sha256(body).hexdigest() != expected_digest:
+        raise ValueError("checkpoint state blob integrity check failed")
+    restored = json.loads(body.decode("utf-8"))
+    return restored if isinstance(restored, dict) else {}
 
 
 def _evidence_packet(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -57,25 +73,34 @@ def _evidence_packet(state: dict[str, Any]) -> list[dict[str, Any]]:
 def _events(workflow_id: str) -> list[dict[str, Any]]:
     if not EVENTS_TABLE_NAME:
         return []
-    response = dynamodb.Table(EVENTS_TABLE_NAME).query(
-        KeyConditionExpression=Key("WorkflowId").eq(workflow_id),
-        Limit=250,
-        ScanIndexForward=True,
-    )
     events: list[dict[str, Any]] = []
-    for item in response.get("Items", []):
-        payload = item.get("Payload", {})
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                payload = {}
-        events.append({
-            "event_type": item.get("EventType"),
-            "step": item.get("Step"),
-            "status": item.get("Status"),
-            "payload": payload if isinstance(payload, dict) else {},
-        })
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {
+            "KeyConditionExpression": Key("WorkflowId").eq(workflow_id),
+            "Limit": 250,
+            "ScanIndexForward": True,
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = dynamodb.Table(EVENTS_TABLE_NAME).query(**params)
+        for item in response.get("Items", []):
+            payload = item.get("Payload", {})
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            events.append({
+                "event_type": item.get("EventType"),
+                "step": item.get("Step"),
+                "status": item.get("Status"),
+                "payload": payload if isinstance(payload, dict) else {},
+            })
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     return events
 
 
@@ -111,8 +136,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         raise ValueError(f"workflow checkpoint not found: {workflow_id}")
 
     checkpoint_tenant = str(checkpoint.get("TenantId") or "")
+    if not checkpoint_tenant:
+        raise PermissionError("workflow checkpoint is missing tenant identity")
     tenant_id = str(event.get("tenant_id") or checkpoint_tenant)
-    if checkpoint_tenant and tenant_id != checkpoint_tenant:
+    if tenant_id != checkpoint_tenant:
         raise PermissionError("workflow tenant does not match audit request")
     state = _state(checkpoint)
     report = state.get("report") if isinstance(state.get("report"), dict) else {}

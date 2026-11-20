@@ -13,6 +13,10 @@ from uuid import uuid4
 class GatewayInvocationError(RuntimeError):
     """Raised when an MCP Gateway call cannot be completed."""
 
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class AgentCoreGatewayClient:
     """Invoke Gateway tools over streamable HTTP MCP with session recovery."""
@@ -65,6 +69,10 @@ class AgentCoreGatewayClient:
                         return item["text"]
         return result
 
+    def _reset_session(self) -> None:
+        self._session_id = None
+        self._initialized = False
+
     def _request(self, payload: dict[str, Any], *, allow_empty: bool = False) -> tuple[Any, dict[str, str]]:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request = urllib.request.Request(
@@ -74,24 +82,53 @@ class AgentCoreGatewayClient:
             headers=self._signed_headers(body, session_id=self._session_id),
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=max(1, int(os.environ.get("GATEWAY_TIMEOUT_SECONDS", "120"))),
+            ) as response:
                 raw = response.read().decode("utf-8")
                 response_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
         except (urllib.error.HTTPError, urllib.error.URLError) as exc:
             detail = exc.read().decode("utf-8", errors="replace") if isinstance(exc, urllib.error.HTTPError) else str(exc)
             status = f" status={exc.code}" if isinstance(exc, urllib.error.HTTPError) else ""
-            raise GatewayInvocationError(f"Gateway call failed{status}: {detail}") from exc
+            raise GatewayInvocationError(
+                f"Gateway call failed{status}: {detail}",
+                status=exc.code if isinstance(exc, urllib.error.HTTPError) else None,
+            ) from exc
         if response_headers.get("mcp-session-id"):
             self._session_id = response_headers["mcp-session-id"]
         if not raw and allow_empty:
             return {}, response_headers
+        frames: list[str] = []
         if raw.lstrip().startswith("data:"):
-            frames = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:") and line[5:].strip()]
-            raw = frames[-1] if frames else "{}"
-        try:
-            return self._extract(json.loads(raw)), response_headers
-        except json.JSONDecodeError as exc:
-            raise GatewayInvocationError(f"Gateway returned non-JSON response: {raw[:500]}") from exc
+            current: list[str] = []
+            for line in raw.splitlines():
+                if line.startswith("data:"):
+                    current.append(line[5:].lstrip())
+                elif not line.strip() and current:
+                    frames.append("\n".join(current))
+                    current = []
+            if current:
+                frames.append("\n".join(current))
+        else:
+            frames = [raw]
+        decoded: list[dict[str, Any]] = []
+        for frame in frames:
+            if not frame.strip():
+                continue
+            try:
+                value = json.loads(frame)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                decoded.append(value)
+        if not decoded:
+            if allow_empty and not raw:
+                return {}, response_headers
+            raise GatewayInvocationError(f"Gateway returned non-JSON response: {raw[:500]}")
+        request_id = payload.get("id")
+        selected = next((value for value in decoded if request_id and value.get("id") == request_id), decoded[-1])
+        return self._extract(selected), response_headers
 
     def _initialize(self) -> None:
         if self._initialized or self.protocol_version == "2026-07-28":
@@ -127,12 +164,20 @@ class AgentCoreGatewayClient:
             )
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        self._initialize()
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid4()),
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         }
-        result, _ = self._request(payload)
-        return result
+        for attempt in range(2):
+            try:
+                self._initialize()
+                result, _ = self._request(payload)
+                return result
+            except GatewayInvocationError as exc:
+                if attempt == 0 and self._session_id and exc.status in {401, 404}:
+                    self._reset_session()
+                    continue
+                raise
+        raise GatewayInvocationError("Gateway call failed after session recovery")

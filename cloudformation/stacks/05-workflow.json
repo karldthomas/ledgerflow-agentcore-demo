@@ -7,6 +7,7 @@
     {"Key": "KmsKeyArn", "Value": "${CF_OUT_KmsKeyArn}"},
     {"Key": "WorkflowCheckpointsTableName", "Value": "${CF_OUT_WorkflowCheckpointsTableName}"},
     {"Key": "WorkflowEventsTableName", "Value": "${CF_OUT_WorkflowEventsTableName}"},
+    {"Key": "RawDataBucketName", "Value": "${CF_OUT_RawDataBucketName}"},
     {"Key": "WorkflowExecutionRoleArn", "Value": "${CF_OUT_WorkflowExecutionRoleArn}"},
     {"Key": "EvaluationExecutionRoleArn", "Value": "${CF_OUT_EvaluationExecutionRoleArn}"},
     {"Key": "EvaluationSamplingPercentage", "Value": "${EVALUATION_SAMPLING_PERCENTAGE}", "Default": "10"},

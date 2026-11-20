@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import io
+import threading
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -58,6 +62,10 @@ class _CheckpointTable:
 
         if self.item is None:
             self.item = {}
+        if ":expires" in values and ":customer" not in values:
+            self.item["LeaseExpiresAt"] = values[":expires"]
+            self.item["UpdatedAt"] = values[":updated"]
+            return {}
         if ":zero" in values:
             self.item["CheckpointVersion"] = int(self.item.get("CheckpointVersion", 0)) + 1
             self.item.update(
@@ -227,6 +235,55 @@ def test_gateway_initializes_mcp_session_and_reuses_session_header(monkeypatch):
     assert calls[2]["headers"]["Mcp-session-id"] == "session-1"
 
 
+def test_gateway_reinitializes_expired_session_and_selects_matching_sse_frame(monkeypatch):
+    calls: list[dict[str, object]] = []
+    expired = False
+
+    def fake_urlopen(request, timeout):
+        nonlocal expired
+        body = json.loads(request.data.decode("utf-8"))
+        calls.append({"body": body, "headers": dict(request.headers), "timeout": timeout})
+        if body["method"] == "initialize":
+            session = "session-1" if not expired else "session-2"
+            return _Response(
+                json.dumps({"result": {"protocolVersion": "2025-11-25", "capabilities": {}}}).encode(),
+                {"Mcp-Session-Id": session},
+            )
+        if body["method"] == "notifications/initialized":
+            return _Response(b"", {"Mcp-Session-Id": "session-1" if not expired else "session-2"})
+        if not expired:
+            expired = True
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "session expired",
+                hdrs={},
+                fp=io.BytesIO(b"session expired"),
+            )
+        matching = {
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": {"content": [{"type": "text", "text": '{"items": [{"id": "INC-1"}]}' }]},
+        }
+        unrelated = {"jsonrpc": "2.0", "id": "unrelated", "result": {"content": []}}
+        payload = f"data: {json.dumps(unrelated)}\n\ndata: {json.dumps(matching)}\n\n".encode()
+        return _Response(payload, {"Mcp-Session-Id": "session-2"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = AgentCoreGatewayClient("https://gateway.example", protocol_version="2025-11-25")
+    client._signed_headers = lambda _body, session_id=None: {"Mcp-Session-Id": session_id} if session_id else {}
+
+    assert client.call_tool("Incidents___search_incidents", {"tenant_id": "tenant_acme"}) == {"items": [{"id": "INC-1"}]}
+    assert [call["body"]["method"] for call in calls] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+
+
 class _ConverseClient:
     def __init__(self):
         self.calls = []
@@ -280,9 +337,9 @@ def test_bedrock_reasoner_keeps_grounded_ids_and_blocks_financial_actions():
         memories=[],
     )
 
-    assert report.root_cause == "The retry key changed after a timeout."
+    assert report.root_cause == "The deterministic evidence indicates a regenerated retry key."
     assert report.evidence_ids == ["INC-1", "LOG-1"]
-    assert report.recommended_actions == ["Reconcile provider status"]
+    assert report.recommended_actions == ["Review the incident through the approved process."]
     call = client.calls[0]
     assert call["modelId"] == "arn:aws:bedrock:us-east-1:123456789012:prompt/SYNTHESIS:1"
     assert "system" not in call
@@ -385,6 +442,72 @@ def test_runtime_entry_delegates_to_the_aws_handler_only(monkeypatch):
         {"event": "init"},
         {"event": "handle", "payload": {"customer_id": "ACME-482"}},
     ]
+
+
+def test_runtime_invocation_context_isolated_for_concurrent_requests():
+    from ledgerflow import cloud_agent as cloud_agent_module
+
+    handler = object.__new__(CloudInvestigationHandler)
+    handler.worker_id = "test-worker"
+    barrier = threading.Barrier(2)
+    observed: list[tuple[str, str, str, str]] = []
+
+    def fake_handle(payload):
+        context = cloud_agent_module._INVOCATION_CONTEXT.get()
+        assert context is not None
+        barrier.wait(timeout=2)
+        # Keep both invocations overlapped long enough to expose shared fields.
+        observed.append((payload["workflow_id"], context.workflow_id, context.tenant_id, context.owner))
+        return {"workflow_id": context.workflow_id, "tenant_id": context.tenant_id}
+
+    handler._handle = fake_handle
+    payloads = [
+        {"workflow_id": "wf-a", "customer_id": "customer-a", "tenant_id": "tenant-a"},
+        {"workflow_id": "wf-b", "customer_id": "customer-b", "tenant_id": "tenant-b"},
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(handler.handle, payloads))
+
+    assert sorted(results, key=lambda item: item["workflow_id"]) == [
+        {"workflow_id": "wf-a", "tenant_id": "tenant-a"},
+        {"workflow_id": "wf-b", "tenant_id": "tenant-b"},
+    ]
+    assert {(row[0], row[1], row[2]) for row in observed} == {
+        ("wf-a", "wf-a", "tenant-a"),
+        ("wf-b", "wf-b", "tenant-b"),
+    }
+    assert len({row[3] for row in observed}) == 2
+
+
+def test_large_checkpoint_state_is_spilled_and_integrity_checked(monkeypatch):
+    class _Body:
+        def __init__(self, value):
+            self.value = value
+
+        def read(self):
+            return self.value
+
+    class _S3:
+        def __init__(self):
+            self.objects = {}
+
+        def put_object(self, *, Bucket, Key, Body, **_kwargs):
+            self.objects[(Bucket, Key)] = Body
+
+        def get_object(self, *, Bucket, Key):
+            return {"Body": _Body(self.objects[(Bucket, Key)])}
+
+    monkeypatch.setenv("RAW_DATA_BUCKET", "raw-bucket")
+    monkeypatch.setenv("WORKFLOW_CHECKPOINT_MAX_BYTES", "64000")
+    handler = object.__new__(CloudInvestigationHandler)
+    handler.s3 = _S3()
+    state = {"logs": ["x" * 70_000]}
+
+    pointer = json.loads(handler._checkpoint_state("wf-large", "log_lookup", state))
+    restored = handler._restore_checkpoint_state(pointer)
+
+    assert pointer["__state_blob__"]["bucket"] == "raw-bucket"
+    assert restored == state
 
 
 def test_runtime_resumes_after_one_shot_checkpoint_failure(monkeypatch):

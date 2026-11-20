@@ -37,7 +37,8 @@ Parameters:
     Description: Optional email to invite as the first Cognito admin.
   BootstrapAdminTenantId:
     Type: String
-    Default: tenant_acme
+    Default: ''
+    Description: Tenant identity for the optional bootstrap admin; required when BootstrapAdminEmail is set.
   AllowedOrigin:
     Type: String
     Default: '*'
@@ -435,7 +436,6 @@ Resources:
     Type: Custom::LedgerFlowBootstrapAdmin
     Condition: HasBootstrapAdmin
     DependsOn:
-      - BootstrapAdminFunction
       - LedgerFlowAdminsGroup
     Properties:
       ServiceToken: !GetAtt BootstrapAdminFunction.Arn

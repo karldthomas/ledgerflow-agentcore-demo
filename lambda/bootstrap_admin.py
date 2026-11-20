@@ -31,15 +31,18 @@ def handler(event: dict[str, Any], context: Any) -> None:
         props = event.get("ResourceProperties", {})
         email = str(props.get("Email", "")).strip().lower()
         user_pool_id = str(props["UserPoolId"])
+        tenant_id = str(props.get("TenantId", "")).strip()
         if not email:
             _reply(event, context, "SUCCESS", "No bootstrap email supplied")
             return
+        if not tenant_id:
+            raise ValueError("TenantId is required when bootstrapping an admin")
         client = boto3.client("cognito-idp")
         try:
             client.admin_create_user(
                 UserPoolId=user_pool_id,
                 Username=email,
-                UserAttributes=[{"Name": "email", "Value": email}, {"Name": "custom:tenant_id", "Value": str(props.get("TenantId", "tenant_acme"))}],
+                UserAttributes=[{"Name": "email", "Value": email}, {"Name": "custom:tenant_id", "Value": tenant_id}],
                 DesiredDeliveryMediums=["EMAIL"],
             )
         except client.exceptions.UsernameExistsException:

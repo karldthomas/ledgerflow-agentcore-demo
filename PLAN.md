@@ -219,9 +219,9 @@ push is therefore a CI artifact step; the resulting immutable ECR digest is
 passed into the `AWS::BedrockAgentCore::Runtime` resource. All AWS resources
 and their configuration still remain managed by CloudFormation.
 
-Before enabling enforcement, deploy the Gateway policy engine in `LOG_ONLY`
-mode, run the authorization regression suite, and then update the same
-CloudFormation parameter to `ENFORCE`.
+The CloudFormation defaults deploy the Gateway policy engine in enforced
+`ENFORCE`/`ACTIVE` mode. Use `LOG_ONLY` only for an explicitly controlled
+observation-only rollout, then restore the enforced defaults.
 
 ## S3 Vectors retrieval design
 
@@ -856,8 +856,8 @@ The POC is complete when it can:
 - Built and pinned the Runtime as `linux/arm64`, which is the supported
   AgentCore Runtime architecture in this account, and added an explicit
   RuntimeEndpoint dependency so the endpoint waits for Runtime readiness.
-- The deployed defaults remain `GatewayPolicyMode=LOG_ONLY`,
-  `PolicyEnforcementMode=LOG_ONLY`, and model reasoning disabled.
+- The deployed defaults are `GatewayPolicyMode=ENFORCE`,
+  `PolicyEnforcementMode=ACTIVE`, and model reasoning disabled.
 
 ### 2026-11-18 — Milestone 17 complete: durable workflow and evaluation
 

@@ -120,7 +120,9 @@ Resources:
                   - s3vectors:UpdateIndexMode
                   - s3vectors:PutVectorBucketDefaultIndexMode
                   - s3vectors:UpdateMetadataConfiguration
-                Resource: '*'
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/ledgerflow-${EnvironmentName}-vectors
+                  - !Sub arn:${AWS::Partition}:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/ledgerflow-${EnvironmentName}-vectors/index/*
 
   EnhancedIndexConfigurationFunction:
     Type: AWS::Serverless::Function

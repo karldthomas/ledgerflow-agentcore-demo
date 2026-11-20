@@ -102,9 +102,17 @@ def _is_admin(claims: dict[str, Any]) -> bool:
 
 
 def _tenant(claims: dict[str, Any], requested: str | None = None) -> str:
-    if _is_admin(claims) and requested:
-        return str(requested)
-    return str(claims.get("custom:tenant_id") or claims.get("tenant_id") or "tenant_acme")
+    claimed = str(claims.get("custom:tenant_id") or claims.get("tenant_id") or "").strip()
+    requested_id = str(requested or "").strip()
+    if _is_admin(claims):
+        tenant_id = requested_id or claimed
+    else:
+        if requested_id and claimed and requested_id != claimed:
+            raise PermissionError("requested tenant is outside the authenticated tenant scope")
+        tenant_id = claimed
+    if not tenant_id:
+        raise PermissionError("authenticated tenant identity is required")
+    return tenant_id
 
 
 def _body(event: dict[str, Any]) -> dict[str, Any]:
@@ -185,11 +193,22 @@ def _dev_tool_view(item: dict[str, Any], now: int | None = None) -> dict[str, An
 def _list_dev_tools(claims: dict[str, Any]) -> dict[str, Any]:
     _require_dev_tools_access(claims)
     now = int(time.time())
-    response = _dev_tools_table().scan(Limit=100)
+    items: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {"Limit": 100}
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = _dev_tools_table().scan(**params)
+        items.extend(item for item in response.get("Items", []) if isinstance(item, dict))
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     controls = [
         _dev_tool_view(item, now)
-        for item in response.get("Items", [])
-        if isinstance(item, dict) and str(item.get("Environment") or ENVIRONMENT_NAME) == ENVIRONMENT_NAME
+        for item in items
+        if str(item.get("Environment") or ENVIRONMENT_NAME) == ENVIRONMENT_NAME
     ]
     controls.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     return {
@@ -217,11 +236,22 @@ def _arm_failure_plan(event: dict[str, Any], claims: dict[str, Any]) -> dict[str
         raise ValueError("ttl_minutes must be an integer between 1 and 120")
 
     now_epoch = int(time.time())
-    existing = _dev_tools_table().query(
-        IndexName="WorkflowStepIndex",
-        KeyConditionExpression=Key("WorkflowId").eq(workflow_id) & Key("Step").eq(step),
-        Limit=50,
-    ).get("Items", [])
+    existing: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {
+            "IndexName": "WorkflowStepIndex",
+            "KeyConditionExpression": Key("WorkflowId").eq(workflow_id) & Key("Step").eq(step),
+            "Limit": 50,
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        response = _dev_tools_table().query(**params)
+        existing.extend(item for item in response.get("Items", []) if isinstance(item, dict))
+        next_key = response.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     for item in existing:
         if isinstance(item, dict) and _dev_tool_status(item, now_epoch) == "ACTIVE":
             raise ValueError("an active failure plan already exists for this workflow and step")
@@ -292,27 +322,40 @@ def _put_event(workflow_id: str, tenant_id: str, event_type: str, step: str, sta
 
 
 def _query_events(workflow_id: str, tenant_id: str, claims: dict[str, Any]) -> list[dict[str, Any]]:
-    result = _event_table().query(KeyConditionExpression=Key("WorkflowId").eq(workflow_id), Limit=250, ScanIndexForward=True)
     events: list[dict[str, Any]] = []
-    for item in result.get("Items", []):
-        if item.get("TenantId") != tenant_id:
-            continue
-        if item.get("Visibility") == "admin" and not _is_admin(claims):
-            continue
-        payload = item.get("Payload", "{}")
-        try:
-            payload = json.loads(payload)
-        except (TypeError, json.JSONDecodeError):
-            payload = {"value": str(payload)}
-        events.append({
-            "event_id": item.get("EventId"),
-            "event_type": item.get("EventType"),
-            "step": item.get("Step"),
-            "status": item.get("Status"),
-            "visibility": item.get("Visibility", "operator"),
-            "created_at": item.get("CreatedAt"),
-            "payload": payload,
-        })
+    start_key: dict[str, Any] | None = None
+    for _ in range(100):
+        params: dict[str, Any] = {
+            "KeyConditionExpression": Key("WorkflowId").eq(workflow_id),
+            "Limit": 250,
+            "ScanIndexForward": True,
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        result = _event_table().query(**params)
+        for item in result.get("Items", []):
+            if item.get("TenantId") != tenant_id:
+                continue
+            if item.get("Visibility") == "admin" and not _is_admin(claims):
+                continue
+            payload = item.get("Payload", "{}")
+            try:
+                payload = json.loads(payload)
+            except (TypeError, json.JSONDecodeError):
+                payload = {"value": str(payload)}
+            events.append({
+                "event_id": item.get("EventId"),
+                "event_type": item.get("EventType"),
+                "step": item.get("Step"),
+                "status": item.get("Status"),
+                "visibility": item.get("Visibility", "operator"),
+                "created_at": item.get("CreatedAt"),
+                "payload": payload,
+            })
+        next_key = result.get("LastEvaluatedKey")
+        if not next_key or next_key == start_key:
+            break
+        start_key = next_key
     return events
 
 
@@ -335,8 +378,11 @@ def _get_investigation(workflow_id: str, claims: dict[str, Any]) -> dict[str, An
     checkpoint = _checkpoint_table().get_item(Key={"WorkflowId": workflow_id}).get("Item")
     if not checkpoint:
         return {"workflow_id": workflow_id, "status": "unknown", "events": []}
-    tenant_id = _tenant(claims, checkpoint.get("TenantId"))
-    if not _is_admin(claims) and checkpoint.get("TenantId") != tenant_id:
+    checkpoint_tenant = str(checkpoint.get("TenantId") or "").strip()
+    if not checkpoint_tenant:
+        raise PermissionError("workflow checkpoint is missing tenant identity")
+    tenant_id = _tenant(claims, checkpoint_tenant)
+    if not _is_admin(claims) and checkpoint_tenant != tenant_id:
         raise PermissionError("workflow is outside tenant scope")
     events = _query_events(workflow_id, tenant_id, claims)
     data = checkpoint.get("Data", "{}")
@@ -344,6 +390,12 @@ def _get_investigation(workflow_id: str, claims: dict[str, Any]) -> dict[str, An
         data = json.loads(data)
     except (TypeError, json.JSONDecodeError):
         data = {"value": str(data)}
+    if isinstance(data, dict) and isinstance(data.get("__state_blob__"), dict):
+        pointer = data["__state_blob__"]
+        data = {
+            "state_externalized": True,
+            "state_bytes": int(pointer.get("bytes", 0) or 0),
+        }
     return {
         "workflow_id": workflow_id,
         "tenant_id": tenant_id,
@@ -403,7 +455,9 @@ def _create_user(event: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any
         raise PermissionError("only admins can create users")
     payload = _body(event)
     email = str(payload.get("email", "")).strip().lower()
-    tenant_id = str(payload.get("tenant_id", "tenant_acme")).strip()
+    tenant_id = str(payload.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
     group = str(payload.get("group", "operators")).strip().lower()
     if not email or "@" not in email:
         raise ValueError("a valid email is required")

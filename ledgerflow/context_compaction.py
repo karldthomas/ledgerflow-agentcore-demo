@@ -34,6 +34,10 @@ class ContextInvariantError(ValueError):
     """Raised when a compacted context cannot satisfy its safety contract."""
 
 
+class TenantScopeViolation(ContextInvariantError):
+    """Raised when evidence or memory belongs to a different tenant."""
+
+
 def estimate_tokens(value: Any) -> int:
     """Estimate JSON token usage without adding a model-specific dependency.
 
@@ -436,7 +440,7 @@ class ContextCompactor:
                 data = {"value": data}
             source_tenant = _tenant_from(data)
             if source_tenant and source_tenant not in {tenant_id, "public"}:
-                raise ContextInvariantError(
+                raise TenantScopeViolation(
                     f"evidence {evidence_id} belongs to tenant {source_tenant}, not {tenant_id}"
                 )
             kind = str(raw.get("kind") or data.get("source_type") or "evidence")
@@ -458,7 +462,7 @@ class ContextCompactor:
                 continue
             source_tenant = _tenant_from(raw)
             if source_tenant and source_tenant != tenant_id:
-                raise ContextInvariantError(
+                raise TenantScopeViolation(
                     f"memory record belongs to tenant {source_tenant}, not {tenant_id}"
                 )
             memory_id = _memory_id(raw)
