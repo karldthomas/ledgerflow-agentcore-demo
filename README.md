@@ -1,340 +1,75 @@
 # LedgerFlow Incident Response Agent
 
-This repository is a deployable vertical slice of the capstone in
-`CASE_STUDY.md`. The AWS path provisions the AgentCore Runtime, Gateway, Memory,
-and supporting services through eight independent CloudFormation stacks and
-can be launched with `deploy-all.sh`.
+An AWS-deployed AI agent for investigating financial incidents using tenant-scoped evidence, durable workflows, and auditable reports.
 
-The POC investigates the synthetic `ACME-482` duplicate-invoice incident as its
-canonical walkthrough and includes additional tenant-scoped scenarios for
-timeouts, payment failures, configuration errors, and duplicate invoices. It
-demonstrates:
+Built as a deployable proof of concept for [`CASE_STUDY.md`](CASE_STUDY.md), LedgerFlow investigates duplicate invoices, payment failures, timeouts, and configuration errors. The canonical walkthrough uses the synthetic `ACME-482` incident.
 
-- read-only AgentCore Gateway tools with tenant authorization;
-- S3 Vectors enhanced hybrid retrieval with Titan embeddings and reciprocal-rank fusion;
-- task-aware retrieval policies for investigation, explanation, and verification requests;
-- schema-driven evidence normalization with typed facts, relationships, and hypotheses;
-- evidence claims that are traceable to authorized source IDs;
-- AgentCore Memory with tenant namespaces and expiration;
-- versioned DynamoDB checkpoints, workflow leases, and idempotent report publication;
-- a pre-publication deterministic contract gate plus an independent Step Functions post-run audit;
-- Step Functions durable workflow execution; and
-- operator-visible reasoning summaries, execution logs, typed reports, and
-  admin-only Dev tools for deterministic recovery exercises.
+## Features
 
-The AWS Runtime stores its planner and report-synthesis instructions in
-Amazon Bedrock Prompt Management. Each investigation resolves an immutable
-prompt-version ARN at runtime. Administrators can view and edit native Bedrock
-drafts, create new prompts, create immutable versions, and choose the active
-runtime version from the console's Prompt library tab. Operators can inspect
-safe reasoning summaries and execution results, but cannot read or change
-prompt bodies.
+- AgentCore Runtime, Gateway, and Memory for agent execution, authorized read-only tools, and tenant-isolated context.
+- Hybrid retrieval using S3 Vectors, Titan embeddings, BM25, and reciprocal-rank fusion.
+- Evidence-grounded reasoning with typed claims, source citations, and deterministic validation.
+- Durable execution using Step Functions, DynamoDB checkpoints, workflow leases, and idempotent report publication.
+- Versioned prompts managed through Amazon Bedrock Prompt Management.
+- Operator console with investigation timelines, reasoning summaries, audit results, and reports.
+- Recovery testing through admin-only failure injection and checkpoint-based retries.
 
-The deterministic deployment fixture corpus contains 21 evidence documents, 113
-incidents, 213 customers, 231 invoices, 5,150 application logs, and 43
-deployments. The `tenant_acme` slice includes the original `ACME-482` and
-`ACME-483` records plus 13 additional cases, `ACME-484` through `ACME-496`.
-`ACME-496` / `INC-1059` is a dedicated context-pressure case with 120 verbose
-application logs and 16 related invoices so the compactor produces
-reference-only evidence under the default 8,000-token budget.
+The model handles investigation planning and report synthesis. Authorization, retrieval boundaries, evidence validation, and workflow state remain deterministic. No financial-write tools are exposed.
 
-The deployed AWS Runtime uses a bounded Bedrock Converse planner and report
-synthesizer with `amazon.nova-micro-v1:0`; the model can classify the task and
-refine queries, while the deterministic retrieval-policy registry chooses the
-bounded source scope and ranking strategy. Gateway, tenant authorization,
-checkpoints, and evidence validation remain application-owned.
-The model cannot execute financial writes or cite IDs outside the authorized
-evidence packet. The AWS path in this repository uses AgentCore
-Runtime/Gateway/Memory, DynamoDB, S3, S3 Vectors, Lambda, Step Functions,
-Cognito, API Gateway, and CloudWatch through independent CloudFormation stacks.
+## Architecture
 
-## Deployment prerequisites
-
-The repository is deployed from a host with:
-
-- Python 3.12 or newer;
-- the AWS CLI;
-- Docker with Buildx and Linux/arm64 build support; and
-- local `boto3` for the deployment scripts.
-
-The deployment scripts use ambient AWS environment variables. The repository
-does not select an AWS profile. Local commands are limited to deployment
-planning, contract validation, packaging, and tests; the investigation itself
-runs in AgentCore Runtime.
-
-The deployment fixture corpus includes these representative scenarios:
-
-| Customer   | Incident   | Scenario                                              |
-| ---------- | ---------- | ----------------------------------------------------- |
-| `ACME-484` | `INC-1047` | unresolved payment timeout                            |
-| `ACME-485` | `INC-1048` | merchant configuration error                          |
-| `ACME-487` | `INC-1050` | duplicate invoice after a changed retry key           |
-| `ACME-488` | `INC-1051` | timeout reconciled with a successful provider outcome |
-| `ACME-490` | `INC-1053` | provider payment failure                              |
-| `ACME-495` | `INC-1058` | timeout followed by a safe retry                      |
-| `ACME-496` | `INC-1059` | context-pressure compaction exercise                  |
-
-The remaining cases are generated by `ledgerflow/db.py` for
-`cloudformation/ingest.py`; the fixture store is an implementation detail of
-deployment, not an application runtime.
-
-## Layout
-
-```text
-ledgerflow/
-  cloud_agent.py       AWS Runtime handler using Gateway, Memory, DynamoDB, and S3
-  context_compaction.py deterministic context envelope and optional Bedrock semantic pass
-  db.py                deployment-only deterministic fixture generator
-  evidence_reasoning.py  source normalization and typed evidence claims
-  gateway.py            SigV4 MCP client for AgentCore Gateway
-  models.py             shared report contract
-  planner.py            bounded Bedrock investigation planner
-  prompting.py          active native Bedrock prompt-version resolver
-  retrieval_policies.py deterministic task-aware retrieval registry
-  reasoning.py          Bedrock report synthesis with citation checks
-  runtime_entry.py      AgentCore Runtime entrypoint
-  runtime_server.py     HTTP server for Runtime invocations
-cloudformation/
-  deployment.yaml    manifest for stack order, dependencies, and lifecycle steps
-  manifest.py        validated manifest loader with derived JSON pairing
-  orchestrate.py     one-command lifecycle runner
-  stacks/            matching YAML templates and JSON parameter mappings
-  scripts/           deployment configuration and stack-validation helpers
-  deploy.py          dependency planner and context resolver
-  sam_deploy.py      single SAM build/deploy adapter for all eight stacks
-  validate.py        no-AWS deployment-contract validator
-  ingest.py          fixture-to-DynamoDB/S3/S3-Vectors loader
-  requirements.txt   pinned SDK dependency for the SAM-built custom resource
-lambda/
-  requirements.txt   pinned SDK dependency installed by SAM for Lambda code
-  __init__.py        Lambda package marker
-  tool_handler.py    tenant-scoped read-only Gateway targets
-  web_app.py         Cognito-protected console and investigation API
-frontend/            Lambda-served control-room UI
-Dockerfile           AgentCore Runtime container boundary
-deploy-all.sh        one-command build, SAM, ingestion, and deployment entry point
-LICENSE              MIT license
-tests/              context-compaction, AWS adapter, and CloudFormation contract tests
+```mermaid
+flowchart TD
+    UI["Web Console / API"] --> SFN["Step Functions"]
+    SFN --> RT["AgentCore Runtime"]
+    RT <--> MEM["AgentCore Memory"]
+    RT --> GW["AgentCore Gateway"]
+    GW --> TOOLS["Tenant-Scoped Lambda Tools"]
+    TOOLS --> DB["DynamoDB"]
+    TOOLS --> VEC["S3 Vectors"]
+    RT --> STATE["DynamoDB Checkpoints"]
+    RT --> REPORT["S3 Reports"]
+    RT --> PM["Bedrock Prompt Management"]
+    RT --> CW["CloudWatch"]
 ```
 
-## Deployment path
+Infrastructure is provisioned through eight independent CloudFormation stacks using AWS SAM.
 
-AWS operations are never implicit. Validate and preview without creating
-resources:
+## Deployment
+
+Prerequisites: Python 3.12+, AWS CLI, AWS SAM CLI, Docker with Linux/arm64 Buildx support, and boto3.
+
+Configure AWS credentials and Region using standard environment variables.
+
+Validate and preview the deployment without creating resources:
 
 ```bash
 python3 cloudformation/validate.py
 python3 cloudformation/deploy.py --environment dev --plan
 ```
 
-Deploy the independent stacks in order with the procedure in
-[`DEPLOYMENT.md`](DEPLOYMENT.md). The JSON file paired with each YAML stack
-resolves `${CF_OUT_*}` values from ordinary predecessor-stack Outputs; there
-are no nested stacks, exports, imports, Service Catalog products, or
-cross-account dependencies.
-
-The deployed console URL is environment-specific. The deployment script prints
-the URL after Stack 07 completes; it is protected by Cognito authentication.
-
-For a complete AWS deployment, install `boto3` on the deployment host and
-provide ambient AWS credentials:
+Deploy the complete AWS environment:
 
 ```bash
 python3 -m pip install --user boto3
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_REGION=us-east-1
-./deploy-all.sh --environment dev
-```
-
-`AWS_SESSION_TOKEN` is also supported for temporary credentials. The script
-does not select or require an AWS profile. It builds the Linux/arm64 Runtime
-image, submits all eight stacks through `sam deploy`, loads the deterministic
-fixture corpus, and prints the Cognito-protected console URL. SAM runs
-`sam build` for every stack; the four Lambda-bearing stacks additionally stage
-source and dependencies into SAM artifacts. Stack 00 bootstraps the scoped
-artifact bucket used by the later deployments.
-
-## Deterministic recovery test
-
-The deployed dev and test consoles include an admin-only Dev tools tab. It
-arms a one-shot failure plan in DynamoDB; no CloudFormation parameter change is
-needed for each test.
-
-1. Sign in as a Cognito user in the `admins` group and open **Dev tools**.
-2. Enter a unique workflow ID such as `recovery-demo-1`, choose **Read
-   application logs**, choose a short expiry, and click **Arm failure plan**.
-3. Open **Investigation**. The workflow ID is copied into the admin-only
-   workflow field. Submit the case with that same ID.
-4. The first attempt fails after the selected durable checkpoint. Step
-   Functions retries the same workflow, the Runtime skips completed stages,
-   and the investigation finishes. The plan changes to **CONSUMED** in Dev
-   tools.
-
-The selected step means “fail after saving this step,” not “fail before doing
-this step.” For example, selecting **Read application logs** preserves the
-incident, invoice, and log results; the retry resumes with deployment lookup.
-The Investigation timeline shows the first attempt's checkpoint and injected
-failure, followed by a `resumed` event and only the later work on retry.
-
-Under the hood, the plan is stored in the environment's DynamoDB Dev Tools
-table and keyed by the exact workflow ID plus checkpoint. The Runtime claims it
-with a conditional update, so only one concurrent worker can consume it. The
-workflow checkpoint stores the state, completed steps, schema version, lease,
-and report data. A retry rehydrates that record, validates its customer and
-tenant, acquires the workflow lease, and skips every completed step. Report
-publication uses the same workflow ID as its operation key, preventing a retry
-from publishing the report twice.
-
-To cancel a plan before it runs, click **Disarm** in the plan history. The
-control is restricted to `dev` and `test` deployments and is not available in
-production environments.
-
-The runtime claims the plan with a DynamoDB conditional update, so concurrent
-workers cannot consume it twice. The older `failure_after_step` Runtime input
-remains available for automated compatibility tests and is still gated by the
-legacy `FailureInjectionEnabled` environment setting.
-
-## Architecture
-
-```mermaid
-flowchart TB
-  subgraph deploy["Deployment and value exchange"]
-    templates["Eight independent CloudFormation stacks<br/>00 security → 07 web app"]
-    deployer["cloudformation/sam_deploy.py<br/>paired YAML + JSON + SAM deploy"]
-    context["deployment-context-<env>.json<br/>CF_OUT_* mappings"]
-    templates --> deployer --> context
-  end
-
-  subgraph request["Investigation request path"]
-    caller["Caller / operator"]
-    web["Lambda-served web console<br/>Cognito login + admin user management"]
-    sfn["AWS Step Functions<br/>standard durable workflow"]
-    runtime["AgentCore Runtime<br/>arm64 HTTP container<br/>/invocations"]
-    memory["AgentCore Memory<br/>verified incident context"]
-    gateway["AgentCore Gateway<br/>MCP + Cedar policy + IAM"]
-    tools["Six read-only Lambda tools"]
-    business["Encrypted DynamoDB<br/>customers, incidents, invoices, logs, deployments"]
-    embed["Titan Text Embeddings V2"]
-    vectors["S3 Vectors ENHANCED index<br/>BM25 + vector search + native RRF<br/>metadata tenant filters"]
-    state["DynamoDB checkpoints<br/>and operation ledger"]
-    report["SSE-KMS S3 investigation report"]
-    prompt_versions["Bedrock Prompt Management<br/>planner + synthesis versions"]
-    prompt_selection["DynamoDB prompt-selections<br/>active immutable ARN"]
-
-    caller --> web --> sfn
-    caller --> runtime
-    caller --> sfn --> runtime
-    runtime <--> memory
-    runtime --> gateway --> tools
-    tools --> business
-    tools --> embed --> vectors
-    tools --> vectors
-    runtime --> state
-    runtime --> report
-    runtime --> prompt_selection --> prompt_versions
-    web -. "admins create/activate versions" .-> prompt_versions
-  end
-
-  subgraph observe["Observability and quality"]
-    logs["CloudWatch Logs"]
-    metrics["Metric filter, alarm, dashboard"]
-    evaluation["Optional AgentCore online evaluation"]
-    logs --> metrics
-    logs --> evaluation
-  end
-
-  runtime -.-> logs
-  sfn -.-> logs
-  gateway -.-> logs
-  tools -.-> logs
-  context -. "passes ordinary stack Outputs as parameters" .-> runtime
-  context -. "passes ordinary stack Outputs as parameters" .-> sfn
-  context -. "passes ordinary stack Outputs as parameters" .-> web
-```
-
-## Architecture boundary
-
-The model is not authoritative for permissions, memory, workflow state, or
-evidence identity. The schema-driven evidence layer derives the report's typed
-claims from the collected records, and model synthesis may only preserve
-claims and citations that belong to the authorized evidence packet.
-Those concerns are owned by AgentCore Gateway policy, the tenant-scoped Lambda
-tools, AgentCore Memory, the DynamoDB checkpoint and operation ledgers, and the
-schema-driven evidence analyzer. The agent can recommend remediation, but the
-POC has no financial-write tool and explicitly rejects attempts to add one.
-
-## Console and prompt management
-
-The deployed console has two views:
-
-- **Investigation** shows run status, checkpoint timeline hover/focus details,
-  safe reasoning summaries, execution results, evidence IDs, deterministic
-  audit results, and the final typed report.
-- **Prompt versions** is admin-only. It lists the planner, context-compaction,
-  and report-synthesis
-  Bedrock Prompt Management resources, shows the active immutable version,
-  creates new immutable versions from the native Bedrock draft, and lets an
-  administrator choose the active runtime version.
-
-Prompt bodies are intentionally not copied into the application repository or
-stored in the application database. Bedrock owns the editable draft and
-immutable versions; the application stores only the selected version ARN and
-audit metadata. Edit or create prompts in the Prompt library view, use **Open
-Bedrock** when you need the native AWS console, then refresh the view and
-activate the immutable version used by the runtime.
-
-## AWS steps that require an account
-
-The complete development deployment can be run from the repository root with:
-
-```bash
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com ./deploy-all.sh --environment dev
 ```
 
-The script runs tests and contract validation, creates the ECR/SAM staging
-foundation through `sam deploy`, builds and pushes the digest-pinned Runtime
-image, submits all eight stacks through `sam deploy`, ingests the fixture
-corpus, and prints the console URL. SAM runs `sam build` only for the four
-stacks that contain Lambda functions. Install the deployment-host dependencies
-first if needed:
+The script builds the Runtime container, deploys all eight stacks, loads synthetic investigation data, and prints the Cognito-protected console URL.
 
-```bash
-python3 -m pip install --user boto3
-```
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for deployment configuration, stack dependencies, and manual procedures.
 
-Install the AWS SAM CLI from AWS's documented distribution for your OS; Docker
-is also required for the AgentCore Runtime image build.
+## Demo and Recovery Testing
 
-The deployment uses the standard ambient AWS environment variables, including
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, and
-`AWS_REGION`; no AWS profile is selected by the script.
+The deployment includes synthetic tenant-scoped incidents covering duplicate invoices, payment failures, timeouts, and configuration errors.
 
-Useful options are `--environment`, `--region`, `--vector-dimension`, and
-`--release-id`. Controlled follow-up deployments can use `--skip-ingest`,
-`--skip-tests`, or `--skip-validation`. Run `./deploy-all.sh --help` for the
-complete list.
+- `ACME-482`: Canonical duplicate-invoice investigation.
+- `ACME-487`: Duplicate invoice caused by a changed retry key.
+- `ACME-496`: Large evidence set for context-compaction testing.
 
-General-purpose S3 buckets use AWS account-regional namespaces rather than
-CloudFormation-generated global names. Their prefixes are environment-scoped,
-and AWS appends the account/Region suffix automatically. The S3 Vectors bucket
-uses an environment-scoped name that is unique within the account and Region.
-
-Use the detailed reviewable procedure in [`DEPLOYMENT.md`](DEPLOYMENT.md) when
-change sets must be inspected before execution.
-
-1. Supply `BOOTSTRAP_ADMIN_EMAIL` on the first run if a Cognito administrator
-   should be bootstrapped.
-2. Confirm the printed `Web console` URL and sign in through Cognito.
-3. Run the AWS ACME-482 baseline smoke test, an expanded-case smoke test such as
-   ACME-487, and the policy regression suite before enabling Gateway enforcement.
-4. Model planning and report synthesis are enabled in the deployed dev stack;
-   change `MODEL_ID` only after verifying model access and report quality.
-5. Add production tracing, cost telemetry, and a measured reranker.
+In dev and test, administrators can use the console’s Dev tools tab to inject a one-shot failure after a checkpoint. Step Functions retries the workflow, completed stages are skipped, and report publication remains idempotent.
 
 ## Verification
-
-The repository's pre-deployment checks are:
 
 ```bash
 python3 -m pytest
@@ -343,11 +78,22 @@ bash -n deploy-all.sh
 node --check frontend/app.js
 ```
 
-The regression suite covers AWS adapter behavior and all eight independent
-CloudFormation stack contracts. The fixture loader defaults to an in-memory
-SQLite source while uploading the deterministic corpus to AWS; it is not a
-supported application runtime.
+## Repository Structure
+
+| Path | Purpose |
+| --- | --- |
+| `ledgerflow/` | Agent Runtime, planning, retrieval, evidence reasoning, and report synthesis |
+| `cloudformation/` | Infrastructure stacks, deployment orchestration, and fixture ingestion |
+| `lambda/` | Gateway tools and web application API |
+| `frontend/` | Investigation and administration console |
+| `tests/` | Runtime, retrieval, recovery, and infrastructure contract tests |
+| `deploy-all.sh` | End-to-end AWS deployment |
+
+## Documentation
+
+- [`CASE_STUDY.md`](CASE_STUDY.md): System design, implementation decisions, and capstone walkthrough.
+- [`DEPLOYMENT.md`](DEPLOYMENT.md): AWS deployment and operational procedures.
 
 ## License
 
-LedgerFlow is released under the [MIT License](LICENSE).
+MIT
