@@ -584,8 +584,8 @@
     const rows = versions.map((version) => `<div class="prompt-version-row ${version.version === prompt.active_version ? "active" : ""}"><div><strong>v${escapeHtml(version.version)}</strong><span>${escapeHtml(version.description || "No description")}</span></div><div><span>${version.version === prompt.active_version ? "ACTIVE" : ""}</span><small>${escapeHtml(promptDate(version.created_at || version.updated_at))}</small></div></div>`).join("");
     const runtimeControls = runtime
       ? `<div class="prompt-active-row"><label>Runtime version<select data-prompt-version="${escapeHtml(prompt.key)}">${options || "<option>No versions found</option>"}</select></label><button class="secondary-button" type="button" data-activate-prompt="${escapeHtml(prompt.key)}">Use selected version</button></div>`
-      : `<p class="muted small-copy prompt-library-note">Library prompt · create versions here, then assign it to a runtime stage when you are ready.</p>`;
-    const activeLabel = runtime ? `v${escapeHtml(prompt.active_version || "—")} active` : "library prompt";
+      : `<p class="muted small-copy prompt-library-note">Standalone library draft · it does not affect investigations until a version is assigned to a runtime stage.</p>`;
+    const activeLabel = runtime ? `v${escapeHtml(prompt.active_version || "—")} active` : "standalone draft";
     const readonlyName = runtime ? " readonly" : "";
     return `<article class="prompt-card" data-prompt-card="${escapeHtml(prompt.key)}"><div class="prompt-card-header"><div><p class="eyebrow">${escapeHtml(prompt.key)}</p><h3>${escapeHtml(prompt.label)}</h3><code>${escapeHtml(prompt.arn)}</code></div><span class="confidence-badge">${activeLabel}</span></div><div class="prompt-draft-meta">DRAFT · updated ${escapeHtml(promptDate(draft.updated_at))}</div><div class="prompt-editor"><div class="prompt-editor-heading"><div><p class="eyebrow">DRAFT CONTENT</p><strong>Edit native Bedrock prompt</strong></div><span class="prompt-type-badge">${escapeHtml((draft.input_variables || []).map((item) => `{{${item}}}`).join(", ") || "no variables")}</span></div><div class="prompt-form-grid"><label>Prompt name<input data-prompt-name="${escapeHtml(prompt.key)}" value="${escapeHtml(draft.name || prompt.label)}"${readonlyName} /></label><label>Description<input data-prompt-description-text="${escapeHtml(prompt.key)}" value="${escapeHtml(draft.description || "")}" placeholder="What this prompt is for" /></label></div><label>System instructions<textarea data-prompt-system="${escapeHtml(prompt.key)}" rows="6" placeholder="Optional instructions for the model">${escapeHtml(draft.system || "")}</textarea></label><label>User message template<textarea data-prompt-user="${escapeHtml(prompt.key)}" rows="5">${escapeHtml(draft.user || "{{input}}")}</textarea></label><div class="prompt-parameter-grid"><label>Model ID<input data-prompt-model="${escapeHtml(prompt.key)}" value="${escapeHtml(draft.model_id || "")}" /></label><label>Max tokens<input data-prompt-max-tokens="${escapeHtml(prompt.key)}" type="number" min="1" value="${escapeHtml(draft.max_tokens ?? 1000)}" /></label><label>Temperature<input data-prompt-temperature="${escapeHtml(prompt.key)}" type="number" min="0" max="2" step="0.1" value="${escapeHtml(draft.temperature ?? 0)}" /></label></div><div class="prompt-editor-actions"><button class="secondary-button" type="button" data-save-prompt="${escapeHtml(prompt.key)}">Save draft</button><span class="muted small-copy">Saving updates the Bedrock DRAFT only.</span></div></div>${runtimeControls}<div class="prompt-create-row"><label>New version description<input data-prompt-version-description="${escapeHtml(prompt.key)}" placeholder="What changed?" /></label><button class="ghost-button" type="button" data-create-prompt="${escapeHtml(prompt.key)}">Create immutable version</button></div><div class="prompt-version-list"><div class="prompt-version-heading"><span>Version history</span><span>${versions.length} version${versions.length === 1 ? "" : "s"}</span></div>${rows || "<span class='muted small-copy'>No immutable versions returned from Bedrock.</span>"}</div></article>`;
   }
@@ -596,7 +596,16 @@
     $("prompt-list").innerHTML = "<span class='empty-detail'>Loading prompt versions…</span>";
     try {
       const data = await api("/api/admin/prompts");
-      $("prompt-list").innerHTML = (data.prompts || []).map(promptCardMarkup).join("") || "<span class='empty-detail'>No prompt definitions configured.</span>";
+      const prompts = data.prompts || [];
+      const runtimePrompts = prompts.filter((prompt) => prompt.runtime);
+      const libraryPrompts = prompts.filter((prompt) => !prompt.runtime);
+      const runtimeSection = runtimePrompts.length
+        ? `<section class="prompt-group"><div class="section-heading"><div><p class="eyebrow">INVESTIGATION RUNTIME</p><h3>Runtime prompts</h3></div></div><div class="prompt-list">${runtimePrompts.map(promptCardMarkup).join("")}</div></section>`
+        : "";
+      const librarySection = libraryPrompts.length
+        ? `<section class="prompt-group"><div class="section-heading"><div><p class="eyebrow">NOT CONNECTED TO A RUNTIME STAGE</p><h3>Standalone library prompts</h3></div></div><div class="prompt-list">${libraryPrompts.map(promptCardMarkup).join("")}</div></section>`
+        : "";
+      $("prompt-list").innerHTML = runtimeSection + librarySection || "<span class='empty-detail'>No prompt definitions configured.</span>";
     } catch (error) {
       $("prompt-list").innerHTML = "<span class='empty-detail'>Prompt versions could not be loaded.</span>";
       $("prompt-error").textContent = error.message;

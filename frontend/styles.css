@@ -88,6 +88,13 @@ code { color: var(--amber); }
 .prompts-panel { padding: 24px; }
 .prompt-console-link { text-decoration: none; }
 .new-prompt-card { margin-top: 22px; padding: 18px; border: 1px solid rgba(184, 242, 122, .24); border-radius: 16px; background: rgba(184, 242, 122, .045); }
+.new-prompt-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; list-style: none; }
+.new-prompt-disclosure > summary::-webkit-details-marker { display: none; }
+.new-prompt-disclosure > summary strong, .new-prompt-disclosure > summary small { display: block; }
+.new-prompt-disclosure > summary small { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.new-prompt-disclosure[open] > summary { margin-bottom: 20px; }
+.prompt-group + .prompt-group { margin-top: 28px; }
+.prompt-group > .section-heading { margin: 0; }
 .prompt-editor { margin-top: 19px; padding: 16px; border: 1px solid rgba(113, 226, 226, .14); border-radius: 13px; background: rgba(5, 14, 29, .32); }
 .prompt-editor-form { display: grid; gap: 14px; }
 .prompt-editor-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }

@@ -975,11 +975,15 @@ class CloudInvestigationHandler:
         table_name = os.environ.get("OPERATION_LEDGER_TABLE")
         if not table_name:
             return report
-        self._renew_workflow_lease(workflow_id)
+        # The caller has just acquired or checkpointed the workflow lease.
+        # Do not perform a second conditional lease write here: publishing is
+        # a single DynamoDB operation and the redundant renewal can race with
+        # the runtime's lease-release path during checkpoint recovery.
         table = self.dynamodb.Table(table_name)
         operation_id = f"report:{workflow_id}"
         now_epoch = int(time.time())
         owner = self._invocation_owner()
+        existing: dict[str, Any] = {}
         try:
             table.put_item(
                 Item={
@@ -995,6 +999,12 @@ class CloudInvestigationHandler:
             )
         except Exception as exc:
             if not self._is_conditional_failure(exc):
+                self._emit(
+                    "operation_ledger",
+                    "report_publish",
+                    "failed",
+                    {"phase": "claim", "error_type": type(exc).__name__, "error": str(exc)},
+                )
                 raise
             existing = table.get_item(Key={"OperationId": operation_id}).get("Item", {})
             if existing.get("Status") == "SUCCEEDED" and existing.get("ResultJson"):
@@ -1005,38 +1015,63 @@ class CloudInvestigationHandler:
             except (TypeError, ValueError):
                 existing_expiry = 0
             if existing_owner and existing_owner != owner and existing_expiry > now_epoch:
+                self._emit(
+                    "operation_ledger",
+                    "report_publish",
+                    "failed",
+                    {
+                        "phase": "claim_condition",
+                        "error_type": WorkflowInProgressError.__name__,
+                        "error": f"operation {operation_id} is being published by another worker",
+                    },
+                )
                 raise WorkflowInProgressError(f"operation {operation_id} is being published by another worker")
             # A prior worker may have died after the lease write began. Only an
             # expired or owner-matched operation may be completed by this worker.
         try:
-            table.update_item(
-                Key={"OperationId": operation_id},
-                UpdateExpression=(
-                    "SET #status = :status, ResultJson = :result, CompletedAt = :completed, "
-                    "Owner = :owner, ExpiresAtEpoch = :ttl"
-                ),
-                ExpressionAttributeNames={"#status": "Status"},
-                ExpressionAttributeValues={
-                    ":started": "STARTED",
-                    ":status": "SUCCEEDED",
-                    ":result": json.dumps(report.to_dict(), sort_keys=True),
-                    ":completed": datetime.now(timezone.utc).isoformat(),
-                    ":owner": owner,
-                    ":ttl": now_epoch + (30 * 24 * 60 * 60),
-                    ":now": now_epoch,
+            completed_at = datetime.now(timezone.utc).isoformat()
+            table.put_item(
+                Item={
+                    "OperationId": operation_id,
+                    "WorkflowId": workflow_id,
+                    "OperationType": "publish_report",
+                    "Status": "SUCCEEDED",
+                    "ResultJson": json.dumps(report.to_dict(), sort_keys=True),
+                    "CompletedAt": completed_at,
+                    "Owner": owner,
+                    "StartedAt": str(existing.get("StartedAt") or completed_at),
+                    "ExpiresAtEpoch": now_epoch + (30 * 24 * 60 * 60),
                 },
                 ConditionExpression=(
                     "#status = :started AND "
-                    "(attribute_not_exists(Owner) OR Owner = :owner OR "
+                    "(attribute_not_exists(#owner) OR #owner = :owner OR "
                     "attribute_not_exists(ExpiresAtEpoch) OR ExpiresAtEpoch < :now)"
                 ),
+                ExpressionAttributeNames={"#status": "Status", "#owner": "Owner"},
+                ExpressionAttributeValues={
+                    ":started": "STARTED",
+                    ":owner": owner,
+                    ":now": now_epoch,
+                },
             )
         except Exception as exc:
             if self._is_conditional_failure(exc):
                 existing = table.get_item(Key={"OperationId": operation_id}).get("Item", {})
                 if existing.get("Status") == "SUCCEEDED" and existing.get("ResultJson"):
                     return IncidentReport(**json.loads(existing["ResultJson"]))
+                self._emit(
+                    "operation_ledger",
+                    "report_publish",
+                    "failed",
+                    {"phase": "complete_condition", "error_type": type(exc).__name__, "error": str(exc)},
+                )
                 raise WorkflowInProgressError(f"operation {operation_id} is being published by another worker") from exc
+            self._emit(
+                "operation_ledger",
+                "report_publish",
+                "failed",
+                {"phase": "complete", "error_type": type(exc).__name__, "error": str(exc)},
+            )
             raise
         return report
 

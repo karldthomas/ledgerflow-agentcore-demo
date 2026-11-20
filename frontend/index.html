@@ -116,10 +116,11 @@
           <div><p class="eyebrow">ADMIN ONLY</p><h2>Prompt library</h2></div>
           <div class="heading-actions"><a class="mini-button prompt-console-link" href="https://console.aws.amazon.com/bedrock/home?region=us-east-1#/prompts" target="_blank" rel="noopener">Open Bedrock</a><button id="refresh-prompts" class="mini-button" type="button">Refresh</button></div>
         </div>
-        <p class="muted small-copy">View and edit the native Bedrock draft here, create new prompts, snapshot immutable versions, and choose the version used by the runtime stages. Keep <code>{{input}}</code> in a runtime prompt’s user template so the investigation data reaches the model.</p>
+        <p class="muted small-copy">Manage the Bedrock prompts used by investigation stages. Save draft changes, create immutable versions, and choose which version each stage uses. Keep <code>{{input}}</code> in a runtime prompt’s user template so investigation data reaches the model.</p>
         <p id="prompt-error" class="form-error hidden"></p>
-        <section class="new-prompt-card">
-          <div class="prompt-editor-heading"><div><p class="eyebrow">NEW NATIVE PROMPT</p><h3>Create a prompt</h3></div><span class="prompt-type-badge">Bedrock CHAT</span></div>
+        <details class="new-prompt-card new-prompt-disclosure">
+          <summary><span><strong>Create standalone prompt draft</strong><small>This creates a Bedrock draft. It will not affect investigations unless you later assign a version to a runtime stage.</small></span><span class="prompt-type-badge">OPTIONAL</span></summary>
+          <div class="prompt-editor-heading"><div><p class="eyebrow">BEDROCK CHAT</p><h3>New standalone draft</h3></div></div>
           <form id="new-prompt-form" class="prompt-editor-form">
             <div class="prompt-form-grid">
               <label>Name<input id="new-prompt-name" required placeholder="incident-summary" /></label>
@@ -132,9 +133,9 @@
               <label>Max tokens<input id="new-prompt-max-tokens" type="number" min="1" value="1000" required /></label>
               <label>Temperature<input id="new-prompt-temperature" type="number" min="0" max="2" step="0.1" value="0" required /></label>
             </div>
-            <button class="secondary-button" type="submit">Create prompt</button>
+            <button class="secondary-button" type="submit">Create standalone draft</button>
           </form>
-        </section>
+        </details>
         <div id="prompt-list" class="prompt-list"><span class="empty-detail">Loading prompt definitions…</span></div>
       </section>
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .runtime_entry import RuntimeHandler
@@ -65,7 +66,22 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._write(400, {"error": "invalid_request"})
             return
-        except Exception:
+        except Exception as exc:
+            # AgentCore surfaces only the HTTP status to the caller. Keep the
+            # exception and traceback in the runtime log so failed invocations
+            # are diagnosable without exposing request payloads.
+            print(
+                json.dumps(
+                    {
+                        "event": "runtime_invocation_failed",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    default=str,
+                ),
+                flush=True,
+            )
+            traceback.print_exc()
             self._write(500, {"error": "internal_error"})
             return
         self._write(200, result)

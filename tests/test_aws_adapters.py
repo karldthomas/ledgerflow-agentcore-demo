@@ -105,6 +105,42 @@ class _DynamoResource:
         return self.checkpoint_table
 
 
+class _OperationLedgerTable:
+    def __init__(self, item=None):
+        self.item = dict(item) if item else None
+        self.last_put: dict[str, object] | None = None
+
+    def put_item(self, *, Item, ConditionExpression=None, **kwargs):
+        if self.item is not None and ConditionExpression == "attribute_not_exists(OperationId)":
+            raise _ConditionalFailure()
+        if self.item is not None and ConditionExpression:
+            values = kwargs["ExpressionAttributeValues"]
+            current_owner = self.item.get("Owner")
+            current_expiry = int(self.item.get("ExpiresAtEpoch", 0) or 0)
+            owner = values[":owner"]
+            now = int(values[":now"])
+            allowed = (
+                self.item.get("Status") == values[":started"]
+                and (not current_owner or current_owner == owner or current_expiry < now)
+            )
+            if not allowed:
+                raise _ConditionalFailure()
+        self.last_put = {"Item": dict(Item), "ConditionExpression": ConditionExpression, **kwargs}
+        self.item = dict(Item)
+        return {}
+
+    def get_item(self, **_kwargs):
+        return {"Item": dict(self.item)} if self.item else {}
+
+
+class _OperationLedgerResource:
+    def __init__(self, operation_table):
+        self.operation_table = operation_table
+
+    def Table(self, _name):
+        return self.operation_table
+
+
 class _DevToolsTable:
     def __init__(self, item):
         self.item = item
@@ -388,6 +424,41 @@ def test_public_reasoning_events_redact_model_prompts():
     assert "prompt_preview" not in public_payloads[0]
     assert public_payloads[1]["prompt_redacted"] is True
     assert "prompt_preview" not in public_payloads[1]
+
+
+def test_report_publish_recovers_expired_started_operation(monkeypatch):
+    monkeypatch.setenv("OPERATION_LEDGER_TABLE", "operation-ledger")
+    operation_table = _OperationLedgerTable(
+        {
+            "OperationId": "report:wf-recovery",
+            "WorkflowId": "wf-recovery",
+            "OperationType": "publish_report",
+            "Status": "STARTED",
+            "Owner": "dead-worker",
+            "StartedAt": "2026-11-20T14:00:00+00:00",
+            "ExpiresAtEpoch": 1,
+        }
+    )
+    handler = object.__new__(CloudInvestigationHandler)
+    handler.dynamodb = _OperationLedgerResource(operation_table)
+    handler.worker_id = "recovery-worker"
+    handler.lease_seconds = 5
+    handler._renew_workflow_lease = lambda _workflow_id: None
+    report = IncidentReport(
+        incident_id="INC-1",
+        customer_id="ACME-482",
+        root_cause="A retry key changed after a timeout.",
+        evidence_ids=["INC-1"],
+        confidence=0.9,
+        recommended_actions=["Reconcile the original payment."],
+        unresolved_questions=["Was the original payment settled?"],
+    )
+
+    assert handler._publish_idempotently("wf-recovery", report) == report
+    assert operation_table.item["Status"] == "SUCCEEDED"
+    assert operation_table.last_put is not None
+    assert operation_table.last_put["ExpressionAttributeNames"]["#owner"] == "Owner"
+    assert operation_table.last_put["ConditionExpression"].startswith("#status = :started")
 
 
 def test_result_previews_are_bounded_and_allowlisted():
