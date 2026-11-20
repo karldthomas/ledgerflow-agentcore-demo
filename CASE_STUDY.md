@@ -1,204 +1,143 @@
-# LedgerFlow Incident Response Agent: Case Study
+# LedgerFlow Incident Response Agent
 
-## Executive Summary
+## Business Context
 
-LedgerFlow is a deployable AWS proof of concept for investigating tenant-scoped financial incidents. It investigates duplicate invoices, payment failures, timeouts, and configuration errors, then produces an auditable report from authorized evidence.
+LedgerFlow is a fictional SaaS company that processes subscription payments for approximately 2,000 business customers. Its support and engineering teams receive hundreds of payment-related incidents each month.
 
-The implementation demonstrates a bounded agent architecture:
+Investigations currently require people to correlate support tickets, invoices, payment events, application logs, deployment history, and operational guidance. The business needs a consistent way to investigate these incidents, explain the findings, and document the outcome without making an unsafe financial change.
 
-- Bedrock is used for optional investigation planning, context summarization, and report synthesis.
-- AgentCore Runtime, Gateway, and Memory provide the execution, tool boundary, and tenant-isolated memory services.
-- Step Functions and DynamoDB provide durable workflow execution and checkpoint recovery.
-- S3 Vectors provides hybrid evidence retrieval using Titan embeddings, full-text search, and application reranking.
-- Deterministic application code owns authorization, retrieval policy, evidence validation, workflow state, and report publication.
-- The system exposes read-only investigation tools. It does not perform financial writes.
+## Business Problem
 
-This document describes the implementation in the repository as it exists today. Deployment procedures remain in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+LedgerFlow needs an incident-response assistant that can help an authorized operator:
 
-## Problem and Canonical Incident
+- investigate a reported payment incident;
+- determine which customers, invoices, and services are affected;
+- identify a likely root cause from the available operational evidence;
+- distinguish confirmed facts from hypotheses and open questions;
+- recommend corrective actions;
+- preserve an auditable explanation of how the conclusion was reached; and
+- continue an interrupted investigation without repeating a consequential action.
 
-LedgerFlow processes subscription payments for business customers. An operator needs to investigate a report such as:
+The assistant is an investigation aid. It is not authorized to change invoices, issue refunds, cancel payments, charge customers, or modify financial records.
+
+## Users and Stakeholders
+
+### Support and operations users
+
+Need a fast, understandable answer to a customer or internal incident. They need the timeline, affected scope, evidence, root cause, recommendations, and remaining risks in one report.
+
+### Engineering and incident-response users
+
+Need to correlate payment behavior with deployments, logs, configuration, and runbooks. They need enough detail to reproduce the reasoning and plan a fix.
+
+### Administrators
+
+Need to manage access, review investigation history, and test recovery behavior without exposing customer data across tenants.
+
+### Customers and finance stakeholders
+
+Need confidence that reported findings are traceable, that uncertainty is clearly stated, and that no financial action occurs without approval.
+
+## Required Use Cases
+
+The assistant must support investigations for:
+
+1. Duplicate invoices after a retry or timeout.
+2. Payment failures returned by a payment provider.
+3. Payment timeouts whose final provider outcome is unknown or later reconciled.
+4. Merchant or payment configuration errors.
+5. Follow-up verification of an existing incident or explanation of an operational rule.
+
+For every use case, the assistant must return a report tied to the requested customer and incident. It must use only evidence the operator is authorized to see.
+
+## Canonical Incident: ACME-482
+
+The primary business scenario is:
 
 > Investigate why customer ACME-482 received duplicate invoices following the November deployment. Identify the root cause, provide supporting evidence, and recommend corrective actions. Do not perform financial modifications without approval.
 
-The synthetic `ACME-482` case represents a duplicate-invoice incident after a payment timeout:
+The investigation is expected to connect these business facts:
 
-1. Earlier retry handling reused the original idempotency key.
-2. Deployment `3.8.2` regenerated the key after a timeout.
-3. The retry was treated as a new payment operation.
-4. Two invoices were issued for the same renewal.
-5. The report connects the incident, invoice records, application logs, deployment history, and retry runbook to this conclusion.
+1. A payment renewal experienced a timeout.
+2. The retry created a second payment operation instead of safely reusing the original operation identity.
+3. Two invoices were issued for one renewal.
+4. Deployment `3.8.2` introduced the changed retry behavior.
+5. The retry runbook required the original operation identity to be reused and the provider outcome to be reconciled before retrying.
 
-The fixture corpus also includes payment failures, unresolved and reconciled timeouts, configuration errors, additional duplicate-invoice cases, and a large context-compaction case (`ACME-496` / `INC-1059`).
+The expected conclusion is that the retry-key regression caused a duplicate financial operation after a timeout. The report should recommend restoring safe retry behavior, reconciling affected records, and adding regression coverage. It must not execute those actions.
 
-## Implemented Architecture
+## Required Investigation Report
 
-```mermaid
-flowchart TD
-    UI["Cognito Web Console / API"] --> SFN["Step Functions"]
-    SFN --> RT["AgentCore Runtime"]
-    RT <--> MEM["AgentCore Memory"]
-    RT --> GW["AgentCore Gateway"]
-    GW --> TOOLS["Tenant-Scoped Read-Only Lambda Tools"]
-    TOOLS --> DATA["DynamoDB Business Records"]
-    TOOLS --> VEC["S3 Vectors"]
-    RT --> STATE["DynamoDB Checkpoints"]
-    RT --> REPORT["S3 Reports"]
-    RT --> PM["Bedrock Prompt Management"]
-    RT --> CW["CloudWatch"]
-    SFN --> AUDIT["Post-Run Deterministic Audit"]
-    AUDIT --> STATE
-```
+Each completed investigation must include:
 
-The runtime is an HTTP container invoked by Step Functions. The web application starts investigations and reads workflow events and reports through an API Gateway and Lambda backend.
+- an executive summary;
+- the affected customers, invoices, subscriptions, and services;
+- an incident timeline;
+- the suspected root cause and its confidence;
+- supporting evidence and where each piece came from;
+- verified findings separated from hypotheses;
+- recommended corrective actions;
+- recovery history if the investigation was interrupted;
+- unresolved questions and remaining risks; and
+- a clear statement of whether any financial action was taken.
 
-## Investigation Workflow
+The report must be understandable to an operations user and detailed enough for an engineer to validate.
 
-A request follows this completed path:
+## Business Rules and Guardrails
 
-1. The console submits a customer, tenant, request, and workflow ID to Step Functions.
-2. The Runtime creates or resumes a durable workflow and acquires a DynamoDB lease.
-3. Bedrock optionally produces a small validated investigation plan. If model reasoning is disabled or unavailable, the runtime uses a deterministic fallback plan.
-4. Application code selects a fixed retrieval policy for the task type. The model cannot expand the policy's source scope or limits.
-5. The Runtime invokes read-only Gateway tools for the incident, invoices, application logs, deployments, vector evidence, and—when permitted—verified memory.
-6. Evidence is normalized into a typed report with facts, relationships, hypotheses, source IDs, claims, a timeline, findings, recommended actions, and unresolved questions.
-7. The deterministic context compactor creates a bounded context packet. It preserves tenant identity, workflow state, safety invariants, required evidence, and citable source IDs. A Bedrock summarizer may add semantic context without replacing the deterministic packet.
-8. Bedrock may synthesize the narrative report. Model output is constrained to the report contract and is checked against the authorized evidence set. The deterministic report remains the fallback.
-9. A pre-publication audit verifies the report identity, schema, task policy, source citations, tenant scope, memory boundary, and read-only tool usage.
-10. The report is recorded idempotently, written to S3, added to tenant-scoped AgentCore Memory, and the workflow is marked complete.
-11. Step Functions invokes an independent post-run audit over the checkpoint and event history.
+The assistant must:
 
-## Retrieval and Evidence
+- keep each investigation within the operator's tenant and customer scope;
+- never treat an unrelated customer's record as supporting evidence;
+- cite the records that support each material finding;
+- preserve the distinction between fact, relationship, hypothesis, and recommendation;
+- state when evidence is missing, conflicting, stale, or inconclusive;
+- require human approval before any financial remediation;
+- remain read-only for the proof of concept;
+- maintain an investigation history that an operator can review; and
+- avoid duplicating a consequential action if an investigation is resumed.
 
-The deployed retrieval path uses an S3 Vectors enhanced index. Evidence is embedded with the configured Titan embedding model, searched with vector and full-text signals, filtered by tenant metadata, and application-reranked before it enters the report context.
+A prompt, report, or recommendation must not override these rules.
 
-The implemented task policies are:
+## Scenario Coverage
 
-| Policy | Sources and behavior |
+The synthetic business scenarios must include:
+
+| Scenario | Required business behavior |
 | --- | --- |
-| `investigation-v1` | Hybrid retrieval with invoices, logs, deployments, verified memory, and vector evidence; top eight vector results and up to 500 logs |
-| `explanation-v1` | Semantic retrieval focused on runbooks and deployments; excludes invoices, logs, and memory |
-| `verification-v1` | Authoritative retrieval using runbooks plus current invoices, logs, and deployments; excludes memory |
+| `ACME-482` | Explain the canonical duplicate-invoice incident and identify the retry-key regression |
+| `ACME-487` | Identify a duplicate invoice caused by a changed retry key |
+| `ACME-496` | Produce a complete report from a high-volume incident history without losing required findings |
+| Payment failure cases | Distinguish provider rejection from timeout or configuration problems |
+| Timeout cases | Separate unresolved outcomes from safely reconciled outcomes |
+| Configuration cases | Identify the configuration issue and recommend an approved correction path |
 
-The Gateway exposes six read-only tools:
+The scenarios are synthetic and exist to make the requirements repeatable. They do not represent real customer or financial data.
 
-- Search incidents.
-- Read customer invoices.
-- Read application logs.
-- Read deployments.
-- Read current invoice state.
-- Search tenant-scoped evidence in S3 Vectors.
+## Acceptance Criteria
 
-Every tool request carries a tenant ID. The Lambda handlers verify customer ownership and tenant scope before returning data. Report evidence IDs and claim citations must come from the authorized evidence packet.
+The proof of concept meets the business requirements when:
 
-## Context and Model Boundaries
+1. An authorized operator can submit an investigation for each supported incident type.
+2. The ACME-482 report identifies the duplicate renewal, timeout, changed retry key, and deployment-related cause.
+3. Every material conclusion is supported by traceable evidence.
+4. Facts, hypotheses, recommendations, and unresolved questions are clearly separated.
+5. A user cannot receive another tenant's evidence through an investigation.
+6. The assistant does not perform financial writes.
+7. An interrupted investigation can continue with its prior progress intact.
+8. Resuming an investigation does not duplicate a consequential operation or report.
+9. An operator can review the investigation timeline and final report.
+10. The same synthetic scenario produces a repeatable, auditable outcome.
 
-The default context budget is 8,000 estimated tokens. Compaction keeps raw workflow evidence outside the model's working context while retaining a bounded, structured representation with:
+## Scope Boundaries
 
-- read-only and no-financial-write invariants;
-- the customer, tenant, workflow, and task policy;
-- typed facts, relationships, and hypotheses;
-- required and citable evidence IDs;
-- bounded evidence previews and memory records;
-- omitted-record counts and a deterministic context digest.
+This case study covers incident investigation and reporting. It does not require:
 
-The model is responsible for planning and narrative synthesis. It does not own permissions, evidence scope, workflow state, or publication. Prompt definitions for planning, compaction, and synthesis are managed through Amazon Bedrock Prompt Management. Administrators can edit drafts, create immutable prompt versions, and select the active runtime version from the console.
+- refunds, credits, cancellations, charges, invoice edits, or other financial writes;
+- autonomous approval of remediation;
+- a general-purpose support chatbot;
+- real customer data;
+- a production availability or multi-region guarantee; or
+- claims about cost, latency, or accuracy beyond the acceptance criteria above.
 
-## Durable Execution and Recovery
-
-Each investigation stores its state in DynamoDB under a versioned workflow schema. Checkpoints include the current stage, accumulated data, completed stages, tenant and customer identity, lease information, failure-injection state, and report data.
-
-The durable stages are:
-
-`started` → `planning` → `incident_lookup` → `invoice_lookup` → `log_lookup` → `deployment_lookup` → `retrieval` → `memory_lookup` → `context_compaction` → `report_synthesis` → `pre_publish_audit` → `completed`
-
-The Runtime uses leases to prevent concurrent workers from processing the same workflow. On retry, it validates the stored tenant and customer, rehydrates the checkpoint, skips completed stages, and continues at the first incomplete stage. Report publication uses a workflow-derived operation ID so a retry cannot publish the same report twice.
-
-In `dev` and `test`, administrators can use the console's **Dev tools** tab to arm a one-shot failure after a selected checkpoint. The injected failure occurs after the checkpoint is saved. Step Functions retries the Runtime, which resumes from the saved state. This exercises the same checkpoint, lease, idempotency, and event-history behavior used for ordinary recovery. The failure controls are unavailable in production.
-
-## Operator Console
-
-The deployed console is served by Lambda behind API Gateway and Cognito. It provides:
-
-- an Investigation view for starting read-only investigations;
-- workflow timelines with tool calls, checkpoints, reasoning summaries, and audit results;
-- report views with the executive summary, root cause, timeline, verified findings, recommendations, unresolved questions, and cited evidence;
-- an admin-only Prompt library for Bedrock draft and version management;
-- an admin-only Dev tools view for deterministic recovery tests;
-- admin user and operator access controls through Cognito groups.
-
-Raw prompts and private model reasoning are kept out of the operator-facing event stream. Operators receive bounded lifecycle and reasoning summaries instead.
-
-## Synthetic Dataset
-
-The deployment fixture generator creates:
-
-- 21 evidence documents;
-- 113 incidents;
-- 213 customers;
-- 231 invoices;
-- 5,150 application logs;
-- 43 deployments.
-
-The `tenant_acme` slice contains the canonical `ACME-482` investigation and additional cases including:
-
-- `ACME-487`: duplicate invoice after a changed retry key;
-- `ACME-496`: large evidence set for context-compaction testing;
-- payment failures;
-- unresolved and reconciled payment timeouts;
-- merchant configuration errors.
-
-The data is synthetic and is loaded during deployment. It is intended for repeatable demonstrations and contract tests, not for production financial operations.
-
-## AWS Deployment
-
-Infrastructure is defined as eight independent CloudFormation stacks deployed with AWS SAM:
-
-| Stack | Responsibility |
-| --- | --- |
-| `00-security` | KMS keys, IAM roles, artifact storage, and security policies |
-| `01-storage` | DynamoDB tables and S3 storage |
-| `02-s3-vectors` | S3 Vectors bucket, index, and enhanced-index setup |
-| `03-tools` | Tenant-scoped Lambda tools |
-| `04-agentcore` | AgentCore Runtime, Gateway, Memory, and Bedrock prompts |
-| `05-workflow` | Step Functions, workflow audit Lambda, and optional online evaluation |
-| `06-observability` | CloudWatch logs, dashboard, metrics, and alarms |
-| `07-web-app` | Cognito, API Gateway, web application Lambda, and console access |
-
-`deploy-all.sh` builds the Runtime container, deploys the stacks in dependency order, ingests the synthetic data, and prints the Cognito-protected console URL. Deployment planning and contract validation can be run without creating AWS resources.
-
-## Verification
-
-The repository includes runtime, retrieval, context-compaction, recovery, audit, web-console, SAM, and CloudFormation contract tests.
-
-The main verification commands are:
-
-```bash
-python3 -m pytest
-python3 cloudformation/validate.py
-bash -n deploy-all.sh
-node --check frontend/app.js
-```
-
-## Repository Mapping
-
-| Path | Implemented responsibility |
-| --- | --- |
-| `ledgerflow/` | Runtime workflow, planning, retrieval policy, context compaction, evidence analysis, report synthesis, memory, and audit logic |
-| `cloudformation/` | Eight-stack infrastructure, deployment orchestration, validation, and fixture ingestion |
-| `lambda/` | Gateway tools, web API, workflow audit, and admin bootstrap |
-| `frontend/` | Investigation, prompt-management, and recovery-testing console |
-| `tests/` | Unit, adapter, recovery, retrieval, audit, web, SAM, and infrastructure contract tests |
-| `deploy-all.sh` | End-to-end container build, deployment, and fixture-loading entry point |
-
-## Current Scope and Limits
-
-This implementation is a deployable proof of concept, not a claim of production readiness. The completed scope intentionally excludes:
-
-- refunds, cancellations, charges, credits, invoice changes, or other financial-write tools;
-- unrestricted model-directed tool access;
-- a generalized multi-agent system;
-- multi-region deployment or a production availability guarantee;
-- performance, cost, or accuracy claims beyond the included tests and deployment checks.
-
-The design goal is to keep model reasoning useful while making authorization, evidence, and execution state independently verifiable.
+The business outcome is a trustworthy investigation record that helps people make the next decision safely.

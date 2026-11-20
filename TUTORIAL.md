@@ -1,13 +1,17 @@
-# LedgerFlow AgentCore Tutorial
+# LedgerFlow Technical Tutorial
 
-This tutorial explains the technology choices in `PLAN.md` and how each one
-maps to the LedgerFlow incident-response case study.
+This tutorial explains the technology and implementation of the LedgerFlow
+proof of concept. It shows how the repository satisfies the business
+requirements in [`CASE_STUDY.md`](CASE_STUDY.md), including the AWS service
+boundaries, Python modules, runtime workflow, deployment, recovery behavior,
+and verification strategy.
 
-The target is a production-shaped POC, not a single prompt wrapped around an
-LLM. The model performs reasoning, but AWS services and application code own
-retrieval, permissions, memory validity, state recovery, and auditing.
+The implementation is a production-shaped POC, not a single prompt wrapped
+around an LLM. The model performs bounded reasoning, while AWS services and
+application code own retrieval, permissions, memory boundaries, state
+recovery, evidence validation, and auditing.
 
-## What you will build
+## Implemented system
 
 The final request path looks like this:
 
@@ -34,21 +38,17 @@ For the canonical test case, the agent must conclude that deployment 3.8.2
 caused some retries to use a new idempotency key after a timeout. That
 conclusion must be supported by invoice records, application logs, deployment
 records, and the idempotent-retry runbook. The same workflow also runs against
-12 additional `tenant_acme` cases covering unresolved and reconciled timeouts,
-payment failures, configuration errors, and duplicate invoices.
+the additional `tenant_acme` cases covering unresolved and reconciled
+timeouts, payment failures, configuration errors, and duplicate invoices.
 
-## How this tutorial relates to the plan
+## How the documentation is divided
 
-| Tutorial section | Plan section |
+| Document | Purpose |
 |---|---|
-| CloudFormation | CloudFormation deployment plan |
-| S3 Vectors | S3 Vectors retrieval design |
-| Runtime and reasoning | AgentCore Runtime, bounded Bedrock planning, and report synthesis |
-| Gateway and Policy | AgentCore Gateway and Policy |
-| Memory | AgentCore Memory |
-| Context compaction | Context invariants, bounded working context, and semantic compaction |
-| Checkpoints | Durable workflow design |
-| Tests and metrics | Evaluation plan |
+| [`CASE_STUDY.md`](CASE_STUDY.md) | Business context, use cases, rules, expected outcomes, and acceptance criteria |
+| `TUTORIAL.md` | Technology choices, architecture, implementation details, deployment, and verification |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Operational deployment configuration and manual procedures |
+| [`README.md`](README.md) | Concise project overview and quick-start commands |
 
 ## 1. Understand the service boundaries
 
@@ -61,9 +61,9 @@ checkpoint protocol while AWS services provide the managed data and tool
 boundaries.
 
 This is different from AgentCore Harness. Harness supplies a managed agent loop;
-Runtime supplies the environment in which we run our own loop. The plan chooses
-Runtime because explicit context and state behavior are part of the learning
-objective.
+Runtime supplies the environment in which we run our own loop. The implementation
+uses Runtime because explicit context and state behavior are part of the system's
+safety boundary.
 
 ### LedgerFlow orchestration and bounded model reasoning
 
@@ -478,7 +478,7 @@ ACME-496 / INC-1059  high-volume retry history for context-pressure compaction
 
 ## 5. Implement the investigation flow
 
-The Runtime application should process an investigation in explicit stages:
+The Runtime application processes an investigation in explicit stages:
 
 ```text
 request received
@@ -557,39 +557,26 @@ present, otherwise a small deterministic keyword fallback, and finally the
 bounded `investigation-v1` policy. This is a safety fallback, not an attempt
 to reproduce model reasoning.
 
-The remaining case-study work is intentionally separate: iterative retrieval,
-source freshness rules, retrieval benchmarks, and a full financial-operation
-approval path are not enabled by this change. The current financial-operation
-scope remains read-only.
+The current implementation remains read-only. Iterative retrieval, explicit
+source-freshness rules, retrieval benchmarks, and a full financial-operation
+approval path are outside the implemented scope and are tracked as gaps.
 
 ## 6. Implement memory correctly
 
-AgentCore Memory handles short-term session history and long-term semantic
-recall. Use tenant-aware namespaces so a memory from one customer cannot be
-silently reused for another.
+AgentCore Memory is provisioned with a semantic memory strategy and event
+expiration. The Runtime retrieves records from a tenant- and subject-scoped
+namespace such as `/verified/{tenant_id}/{subject_id}/` and records a
+completed investigation report as a memory event.
 
-Use DynamoDB as the canonical verified-facts ledger because the case study needs
-explicit lifecycle states:
+Memory enriches an investigation; it is not the authoritative source for
+customer records or workflow state. A memory read or write failure degrades
+gracefully so that primary operational evidence remains available.
 
-```text
-active
-superseded
-expired
-conflict
-```
-
-When a new fact arrives:
-
-1. validate its source and authority;
-2. check for an identical active fact;
-3. merge duplicate provenance;
-4. supersede an older fact when the new fact is authoritative and newer;
-5. mark equal-authority contradictions as conflicts;
-6. exclude expired facts from retrieval;
-7. write the memory event and ledger update.
-
-This prevents a superseded retry policy from being treated as current merely
-because it is semantically similar to the query.
+The deployment also provisions a DynamoDB verified-facts table and the fixture
+generator contains memory records, but the cloud Runtime does not currently
+use that table as the source of truth for memory lifecycle. Explicit
+deduplication, supersession, conflict handling, and active-versus-expired
+fact management remain implementation gaps documented in [`GAPS.md`](GAPS.md).
 
 ## 7. Preserve context invariants
 
@@ -753,35 +740,35 @@ degraded/fallback outcome rather than silently dropping a required citation.
 
 ## 8. Hydrate state after interruption
 
-Use Step Functions to orchestrate batches and DynamoDB to persist business
-state. Use the AgentCore session ID as a stable workflow identifier, but do not
-depend on the runtime process as the durable source of truth.
+The current Step Functions state machine orchestrates one investigation per
+execution. DynamoDB persists its business state. The Runtime uses the workflow
+ID as the stable identifier and does not depend on the process as the durable
+source of truth.
 
 Checkpoint after each major read or verified transition. Store:
 
 ```text
 workflow_id
-session_id
 customer_id
+tenant_id
 current_step
 completed_steps
 checkpoint_version
-schema_version
-context_manifest
+state_schema_version
+state_data
 lease_owner
-lease_until
-pending_operation_id
+lease_expires_at
 status
+failure_injection_consumed
 ```
 
 On restart:
 
 1. acquire the workflow lease;
 2. load and validate the checkpoint;
-3. migrate or reject incompatible schema versions;
-4. reconcile any pending operation;
-5. rebuild the context from durable evidence and the compaction manifest;
-6. resume from the last verified stage.
+3. rehydrate state only when the stored schema version is compatible;
+4. rebuild the context from durable evidence and the compaction manifest;
+5. resume from the last verified stage.
 
 The deployed Runtime implements this protocol with a versioned DynamoDB
 checkpoint and a conditional workflow lease. To verify it deterministically,
@@ -834,9 +821,9 @@ failure, the resumed attempt, and the later tool results. This makes the
 recovery test observable rather than merely asserting that a final report was
 eventually returned.
 
-For this POC, all investigation tools are read-only. The operation ledger and
-reconciliation tests still model the boundary required before any financial
-write is introduced.
+For this POC, all investigation tools are read-only. Report publication has an
+idempotent operation ledger; uncertain external financial operations and
+approval workflows are outside the implemented scope.
 
 ## 9. Observe and evaluate the system
 
@@ -867,7 +854,7 @@ completeness and root-cause explanation quality.
 
 ## 10. Test the baseline and expanded cases
 
-The first successful report should contain evidence similar to:
+A successful report contains evidence similar to:
 
 ```text
 INC-1042       duplicate invoice incident
@@ -878,7 +865,7 @@ DEP-382        deployment changed retry behavior
 RUNBOOK-014    retries must reuse the original idempotency key
 ```
 
-The report should distinguish:
+A successful report distinguishes:
 
 ```text
 Confirmed:

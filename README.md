@@ -91,7 +91,8 @@ node --check frontend/app.js
 
 ## Documentation
 
-- [`CASE_STUDY.md`](CASE_STUDY.md): System design, implementation decisions, and capstone walkthrough.
+- [`CASE_STUDY.md`](CASE_STUDY.md): Business context, requirements, scenarios, and acceptance criteria.
+- [`TUTORIAL.md`](TUTORIAL.md): Technology choices, implementation details, and verification guide.
 - [`DEPLOYMENT.md`](DEPLOYMENT.md): AWS deployment and operational procedures.
 
 ## License
