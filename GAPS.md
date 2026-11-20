@@ -217,6 +217,198 @@ Still missing, if that scope is added:
 
 This should be implemented last among the ten. The read-only boundary should remain the default until the approval and reconciliation model is complete.
 
+## Productionization gaps and readiness gates
+
+The POC is production-shaped, but it is not yet ready for unrestricted
+customer data or autonomous operational action. Productionization should be
+treated as a separate readiness track: prove the security, data, quality,
+reliability, and operating controls around the existing workflow before
+expanding its scope.
+
+### 1. Product risk and operating model
+
+The first production release should be a read-only decision-support tool with
+human review. It should not issue refunds, credits, cancellations, invoice
+changes, or other financial writes.
+
+Still missing:
+
+- a signed definition of what the report is allowed to decide, recommend, and
+  publish;
+- human-review and escalation rules for low-confidence, conflicting, or
+  high-impact findings;
+- service-level objectives for latency, availability, report freshness, and
+  recovery;
+- documented RTO/RPO, retention, deletion, and data-residency requirements;
+- an owner for each investigation, an operational support process, and an
+  incident-response runbook; and
+- a risk and compliance assessment for the real financial and customer data.
+
+### 2. Identity, tenant isolation, and boundary hardening
+
+The tenant boundary must be enforced by authenticated identity and backend
+policy, never by model output or an untrusted request field. Every tool target
+must independently validate the principal, tenant, customer, and evidence
+scope.
+
+Still missing or requiring production hardening:
+
+- enterprise federation, MFA, user lifecycle management, and a controlled
+  break-glass administrator path;
+- tests proving that a caller or retrieved document cannot select another
+  tenant or escalate tool permissions;
+- Gateway-only Runtime invocation so direct Runtime access cannot bypass
+  Gateway policy, guardrails, or interceptors;
+- an approved VPC/PrivateLink network design, or a documented reason that
+  public Runtime networking is acceptable;
+- verification of current AgentCore Runtime security requirements, including
+  MMDSv2, least-privilege execution roles, non-root containers, and resource
+  policies;
+- backend and IAM gating for Dev tools, not only UI visibility; and
+- a production CORS allow-list, WAF protection, API throttling, and request
+  size/rate limits.
+
+Repository-specific checks include the `PUBLIC` Runtime network mode in
+`cloudformation/stacks/04-agentcore.yaml` and the `*` default for
+`AllowedOrigin` in `cloudformation/stacks/07-web-app.yaml`. These defaults
+must be explicit, reviewed production parameters and should fail deployment
+when left unsafe.
+
+### 3. Data protection, retention, and disaster recovery
+
+Synthetic fixtures hide the consequences of exposing real invoices, logs,
+identifiers, and operational history. Production data needs a complete
+classification and lifecycle policy.
+
+Still missing:
+
+- PII/PCI-sensitive field minimization, redaction, masking, and access review;
+- separate production accounts, keys, buckets, indexes, and prompt resources
+  from development environments;
+- customer-managed encryption and key-rotation procedures, with tightly
+  scoped decrypt access;
+- PITR and tested restore procedures for every critical DynamoDB table,
+  including cross-Region recovery where required;
+- report and audit retention with immutable storage or legal holds where
+  required;
+- evidence snapshots, hashes, timestamps, and source versions so a report can
+  be reproduced after source records change; and
+- tested deletion and subject-data export workflows that include memory,
+  vectors, reports, logs, and cached content.
+
+### 4. AI quality, safety, and evaluation
+
+The deterministic contract audit proves structural validity, not that a report
+is correct. Production approval needs a repeatable quality gate.
+
+Still missing:
+
+- a golden corpus covering every supported incident type and failure mode;
+- retrieval Recall@k/MRR, citation correctness, evidence-claim accuracy,
+  unsupported-claim rate, confidence calibration, and user-acceptance metrics;
+- adversarial fixtures containing prompt injection, poisoned runbooks, malformed
+  records, conflicting evidence, stale memory, and cross-tenant content;
+- evaluation of the full report, not only planner and schema validity;
+- regression thresholds enforced in CI and before model, prompt, retrieval, or
+  schema releases; and
+- layered prompt-attack and content controls such as Bedrock Guardrails,
+  while keeping authorization and evidence validation deterministic outside the
+  model.
+
+### 5. Prompt, model, and memory governance
+
+Prompt Management and Memory are useful production controls only when their
+lifecycles are governed.
+
+Still missing:
+
+- approval, review, canary, rollback, and change records for prompt and model
+  activation;
+- report lineage containing model ID, prompt version, retrieval policy,
+  context-manifest version, and evidence snapshot identifiers;
+- a formal memory promotion policy with deduplication, supersession, conflict
+  handling, provenance, freshness, and tenant-scoped deletion;
+- separate draft editing from production activation; and
+- provider-accurate token, latency, cache-hit, and cost accounting for every
+  model stage.
+
+The current admin Prompt library can edit drafts and create versions. A
+production release should require an approved change path before a new version
+is selected for runtime use.
+
+### 6. Durable workflow, scale, and recovery
+
+The current checkpoint and lease design demonstrates a strong single-run
+foundation, but production failures will include worker termination, provider
+timeouts, duplicate submissions, partial batches, hot tenants, and schema
+migrations.
+
+Still missing:
+
+- fault-injection tests at every meaningful checkpoint and for concurrent
+  resume;
+- explicit handling and reconciliation for uncertain external calls;
+- checkpoint schema versioning, migration, and incompatible-version behavior;
+- bounded concurrency, per-tenant quotas, backpressure, and model/tool rate
+  limits;
+- a batch coordinator with per-customer state, resumable partial completion,
+  and operator views for pending, failed, retried, and completed work;
+- load tests against realistic evidence sizes and model quotas; and
+- recovery procedures that do not depend solely on the Step Functions redrive
+  window or execution-history limits.
+
+### 7. Observability, audit, and cost controls
+
+The current dashboard and failure alarm are a starting point, not an
+operations system.
+
+Still missing:
+
+- end-to-end correlation across user, tenant, workflow, tool, model, prompt,
+  checkpoint, and report IDs;
+- SLO dashboards and alarms for success rate, latency, queue depth, retries,
+  lease expiry, policy denials, citation failures, and stale data;
+- per-tenant and per-stage token, model, retrieval, and infrastructure cost
+  attribution;
+- budgets, quotas, throttles, and abuse detection for billable investigations;
+- centralized CloudTrail, security findings, and access reviews; and
+- a deliberate policy for Bedrock invocation logging because model inputs and
+  outputs may contain sensitive data.
+
+### 8. Delivery, supply chain, and environment management
+
+The current deployment is intentionally single-account and single-Region. A
+production service needs controlled promotion and rollback.
+
+Still missing:
+
+- separate dev, staging, and production accounts with distinct IAM and KMS
+  boundaries;
+- CI/CD gates for unit, contract, security, evaluation, load, and restore
+  tests;
+- immutable ECR image digests, SBOM generation, dependency scanning, image
+  signing, and base-image patching;
+- CloudFormation change approval, drift detection, and tested rollback;
+- canary or blue/green Runtime, workflow, prompt, and model releases; and
+- versioned configuration with no secrets in templates, logs, deployment
+  context, or container environment variables.
+
+### 9. Production pilot exit criteria
+
+Before enabling broad customer access, require all of the following:
+
+- read-only workflows with human sign-off;
+- enforced tenant and Gateway policy tests in a non-development environment;
+- a passing golden-case and adversarial evaluation suite;
+- tested backup restore, checkpoint recovery, and partial-batch recovery;
+- defined SLOs, dashboards, alarms, quotas, and on-call ownership;
+- reviewed data retention, deletion, audit, and compliance controls; and
+- a limited pilot using anonymized or explicitly approved production data.
+
+Authorized financial operations should remain a later phase. If they are ever
+added, use the safeguards in Gap 10 plus a dry-run, reconciliation, approval
+expiry, and independent execution audit.
+
 ## Suggested learning order
 
 1. ~~Context compaction and invariant preservation~~ — complete.
