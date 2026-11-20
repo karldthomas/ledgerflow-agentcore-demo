@@ -3,7 +3,7 @@
 This tutorial explains the technology and implementation of the LedgerFlow
 proof of concept. It shows how the repository satisfies the business
 requirements in [`CASE_STUDY.md`](CASE_STUDY.md), including the AWS service
-boundaries, Python modules, runtime workflow, deployment, recovery behavior,
+boundaries, Python modules, runtime workflow, recovery behavior,
 and verification strategy.
 
 The implementation is a production-shaped POC, not a single prompt wrapped
@@ -46,7 +46,7 @@ timeouts, payment failures, configuration errors, and duplicate invoices.
 | Document | Purpose |
 |---|---|
 | [`CASE_STUDY.md`](CASE_STUDY.md) | Business context, use cases, rules, expected outcomes, and acceptance criteria |
-| `TUTORIAL.md` | Technology choices, architecture, implementation details, deployment, and verification |
+| `TUTORIAL.md` | Technology choices, architecture, implementation details, and verification |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Operational deployment configuration and manual procedures |
 | [`README.md`](README.md) | Concise project overview and quick-start commands |
 
@@ -248,198 +248,7 @@ request body and bypassing the user boundary.
 The Runtime workload role provides AWS access without embedding long-lived
 access keys in the container.
 
-## 2. Provision everything with CloudFormation
-
-CloudFormation is the infrastructure source of truth for this project. Do not
-use CDK or the AgentCore CLI to create production resources.
-
-### Stack structure
-
-Use independent CloudFormation stacks. There is no root stack and no nested
-stack resource:
-
-```text
-cloudformation/
-  stacks/
-    00-security.yaml
-    00-security.json
-    01-storage.yaml
-    01-storage.json
-    02-s3-vectors.yaml
-    02-s3-vectors.json
-    03-tools.yaml
-    03-tools.json
-    04-agentcore.yaml
-    04-agentcore.json
-    05-workflow.yaml
-    05-workflow.json
-    06-observability.yaml
-    06-observability.json
-    07-web-app.yaml
-    07-web-app.json
-  deploy.py
-  sam_deploy.py
-  validate.py
-  ingest.py
-  requirements.txt
-  scripts/
-    replace_environment_vars.py
-    config_to_parameters.py
-```
-
-This POC uses one AWS account and one Region. There are no cross-account roles,
-cross-account pipeline actions, Service Catalog products, or cross-account
-output lookups.
-
-Each independent stack publishes stable identifiers using ordinary
-CloudFormation `Outputs`. The deployment script, rather than CloudFormation
-imports, passes those values to the next stack.
-
-```yaml
-Outputs:
-  VectorIndexName:
-    Value: !Ref VectorIndexName
-  VectorIndexArn:
-    Value: !GetAtt EvidenceIndex.IndexArn
-```
-
-The matching JSON file for the consumer stack contains parameter mappings:
-
-```json
-{
-  "Configuration": [
-    {
-      "Key": "EnvironmentName",
-      "Value": "${EnvironmentName}",
-      "Default": "dev"
-    },
-    {
-      "Key": "VectorIndexName",
-      "Value": "${CF_OUT_VectorIndexName}"
-    },
-    {
-      "Key": "EnableModelReasoning",
-      "Value": "${ENABLE_MODEL_REASONING}",
-      "Default": "ENABLED"
-    },
-    {
-      "Key": "ReasoningModelId",
-      "Value": "${MODEL_ID}",
-      "Default": "amazon.nova-micro-v1:0"
-    }
-  ]
-}
-```
-
-The Python deployment code resolves the placeholders, converts the entries to
-CloudFormation parameter overrides, deploys the stack, then reads its outputs:
-
-```text
-00-security.yaml
-  -> describe-stacks
-  -> CF_OUT_KmsKeyArn
-  -> CF_OUT_ArtifactBucketName
-
-01-storage.json
-  ${CF_OUT_KmsKeyArn}
-
-02-s3-vectors.json
-  ${CF_OUT_RuntimeExecutionRoleArn}
-  ${CF_OUT_ToolsExecutionRoleArn}
-```
-
-The resolver uses explicit `--set` overrides first, then the current deployment
-context, then process environment variables, then each JSON entry’s `Default`.
-This allows the same templates to be deployed to different environments
-without editing the YAML.
-
-### Native resource types
-
-The main infrastructure maps to these CloudFormation resources:
-
-```text
-AWS::S3::Bucket
-AWS::S3Vectors::VectorBucket
-AWS::S3Vectors::VectorBucketPolicy
-AWS::S3Vectors::Index
-AWS::DynamoDB::Table
-AWS::ECR::Repository
-AWS::Serverless::Function (translated to AWS::Lambda::Function)
-AWS::StepFunctions::StateMachine
-AWS::BedrockAgentCore::Runtime
-AWS::BedrockAgentCore::RuntimeEndpoint
-AWS::BedrockAgentCore::Memory
-AWS::BedrockAgentCore::Gateway
-AWS::BedrockAgentCore::GatewayTarget
-AWS::BedrockAgentCore::PolicyEngine
-AWS::BedrockAgentCore::Policy
-AWS::BedrockAgentCore::OnlineEvaluationConfig
-```
-
-S3 Vectors and AgentCore both have native CloudFormation resource types. See
-the [S3 Vectors CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_S3Vectors.html)
-and [AgentCore CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_BedrockAgentCore.html).
-
-### The image-build boundary
-
-CloudFormation can create the ECR repository and the AgentCore Runtime, but it
-does not compile a Docker image. The deployment process therefore has two
-parts:
-
-1. CloudFormation creates the ECR repository.
-2. CI builds and pushes the Runtime image.
-3. CI passes the immutable image digest to CloudFormation.
-4. CloudFormation creates or updates the Runtime with that digest.
-
-This is still infrastructure-as-code: the resource, role, endpoint, and image
-reference are declared in CloudFormation. The image build is simply an
-artifact-production step.
-
-### The SAM deployment boundary
-
-The four stacks that contain Lambda code use the
-`AWS::Serverless-2016-10-31` transform. Their templates describe the handler,
-runtime, role, timeout, environment, and a repository `CodeUri`; they do not
-contain an S3 key for a hand-built ZIP. `cloudformation/sam_deploy.py` resolves
-the ordinary stack-output context. It stages only the source needed by those
-four stacks, runs `sam build` for every stack, and then runs `sam deploy` for
-every stack. Infrastructure-only stacks still go through the SAM build
-translation boundary, but produce no Lambda artifact:
-
-```text
-Every stack:  SAM build -> template translation
-Lambda stack: SAM build -> dependency installation and artifact assembly
-Every stack:  SAM deploy -> managed upload (when needed) and CloudFormation change set
-```
-
-After Stack 00 creates it, the artifact bucket is passed to SAM as the staging
-bucket for later stacks. This keeps the application source, dependency
-installation, and CloudFormation resource definition in one repeatable path
-while avoiding accidental packaging of the repository's tests, documentation,
-or deployment-only data. Stack 00 is small enough to deploy without a staging
-bucket; it creates the scoped bucket used by later stacks. `deploy-all.sh`
-invokes the SAM adapter for all eight stacks.
-`deploy.py --plan` remains the context-aware no-write preview.
-
-### Deployment flow
-
-The deployment workflow is:
-
-```bash
-python3 cloudformation/validate.py
-python3 cloudformation/sam_deploy.py \
-  --environment dev \
-  --region "$AWS_REGION" \
-  --context-file cloudformation/build/deployment-context-dev.json \
-  --stack 00-security
-```
-
-Run the stacks in order, with the Runtime image build and S3 Vectors ingestion
-steps between the infrastructure stacks. Invoke `sam_deploy.py` for every
-stack, passing the Stack 00 artifact bucket after bootstrap. No
-`Fn::ImportValue` is required.
-
-## 3. Store the data in the right place
+## 2. Store the data in the right place
 
 Do not place every record into vector search.
 
@@ -474,7 +283,7 @@ Use an S3 vector bucket for the embeddings and searchable document chunks.
 S3 Vectors is a specialized vector storage service; it is not the same thing as
 a normal S3 bucket.
 
-## 4. Build the S3 Vectors index
+## 3. Build the S3 Vectors index
 
 ### Choose the index configuration
 
@@ -555,7 +364,7 @@ ACME-495 / INC-1058  timeout followed by a safe retry
 ACME-496 / INC-1059  high-volume retry history for context-pressure compaction
 ```
 
-## 5. Implement the investigation flow
+## 4. Implement the investigation flow
 
 The Runtime application processes an investigation in explicit stages:
 
@@ -640,7 +449,7 @@ The current implementation remains read-only. Iterative retrieval, explicit
 source-freshness rules, retrieval benchmarks, and a full financial-operation
 approval path are outside the implemented scope and are tracked as gaps.
 
-## 6. Implement memory correctly
+## 5. Implement memory correctly
 
 AgentCore Memory is provisioned with a semantic memory strategy and event
 expiration. The Runtime retrieves records from a tenant- and subject-scoped
@@ -657,7 +466,7 @@ use that table as the source of truth for memory lifecycle. Explicit
 deduplication, supersession, conflict handling, and active-versus-expired
 fact management remain implementation gaps documented in [`GAPS.md`](GAPS.md).
 
-## 7. Preserve context invariants
+## 6. Preserve context invariants
 
 Context compaction is not simply asking the model to summarize its previous
 messages. It is a controlled transformation of the model's working packet.
@@ -817,7 +626,7 @@ packet. To demonstrate a hard budget failure, lower the token budget until the
 mandatory reference IDs themselves cannot fit; the runtime records the
 degraded/fallback outcome rather than silently dropping a required citation.
 
-## 8. Hydrate state after interruption
+## 7. Hydrate state after interruption
 
 The current Step Functions state machine orchestrates one investigation per
 execution. DynamoDB persists its business state. The Runtime uses the workflow
@@ -904,7 +713,7 @@ For this POC, all investigation tools are read-only. Report publication has an
 idempotent operation ledger; uncertain external financial operations and
 approval workflows are outside the implemented scope.
 
-## 9. Observe and evaluate the system
+## 8. Observe and evaluate the system
 
 Enable AgentCore Observability and CloudWatch Transaction Search. Add custom
 spans for:
@@ -931,7 +740,7 @@ Build deterministic evaluators for:
 Use AgentCore Evaluations for broader session-level quality such as report
 completeness and root-cause explanation quality.
 
-## 10. Test the baseline and expanded cases
+## 9. Test the baseline and expanded cases
 
 A successful report contains evidence similar to:
 
@@ -1015,9 +824,9 @@ reconciled timeout or `ACME-485` for a configuration failure through the
 deployed console or API. The deployed tenant has the same cases under
 `INC-1047` through `INC-1059`.
 
-## Web console
+## 10. Web console
 
-Stack 07 serves the control room directly from Lambda through API Gateway HTTP;
+The web application serves the control room directly from Lambda through API Gateway HTTP;
 there is no CloudFront distribution or public frontend bucket. Cognito is
 configured with `AllowAdminCreateUserOnly`, and the API only permits users in
 the `admins` group to create or list users. Operators receive only their
@@ -1044,61 +853,3 @@ and redaction markers; raw prompt previews remain admin-only. The final report
 also renders an “Evidence reasoning” section with each typed claim and its
 source IDs. The Execution log has an `Open log` popover where an operator can
 select an event and inspect its structured, tenant-scoped payload.
-
-## 11. Recommended repository layout
-
-```text
-ledgerflow-agent/
-  PLAN.md
-  TUTORIAL.md
-  DEPLOYMENT.md
-  CASE_STUDY.md
-  ledgerflow/
-    cloud_agent.py
-    context_compaction.py
-    db.py
-    evidence_reasoning.py
-    gateway.py
-    models.py
-    planner.py
-    prompting.py
-    retrieval_policies.py
-    reasoning.py
-    runtime_entry.py
-    runtime_server.py
-  cloudformation/
-    deployment.yaml          stack graph and lifecycle-step manifest
-    manifest.py              manifest parser and dependency validation
-    orchestrate.py           one-command lifecycle runner
-    stacks/                  matching YAML/JSON stack pairs
-    deploy.py                dependency plan and context resolver
-    sam_deploy.py            SAM deploy adapter for all eight stacks
-    validate.py              no-AWS contract validation
-    ingest.py                DynamoDB/S3/S3-Vectors fixture loader
-    requirements.txt         SAM dependency manifest for the custom resource
-  lambda/tool_handler.py     read-only Gateway target handlers
-  tests/
-    test_context_compaction.py
-  Dockerfile
-  pyproject.toml
-  README.md
-```
-
-## 12. Official references
-
-- [AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html)
-- [AgentCore Runtime versus Harness](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/harness-vs-runtime.html)
-- [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html)
-- [AgentCore Policy](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy.html)
-- [AgentCore Memory](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory.html)
-- [AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html)
-- [AgentCore Observability](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)
-- [AgentCore Evaluations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/create-evaluator.html)
-- [Bedrock Prompt Management](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-management-create.html)
-- [Invoke a managed prompt with Converse](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-management-code-ex.html)
-- [S3 Vectors](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html)
-- [S3 Vectors hybrid search](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-hybrid-search.html)
-- [S3 Vectors metadata filtering](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-metadata-filtering.html)
-- [S3 Vectors full-text configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors-configuring-full-text-search.html)
-- [S3 Vectors CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_S3Vectors.html)
-- [AgentCore CloudFormation resources](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_BedrockAgentCore.html)
