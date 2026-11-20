@@ -1,5 +1,7 @@
 # LedgerFlow Incident Response Agent
 
+This case study and its implementation were created with substantial assistance from AI. AI generated much of the code and helped develop the accompanying materials, while I directed the architecture, made the design decisions, and reviewed the results. This project is intended as a tutorial.
+
 An AWS-deployed AI agent for investigating financial incidents using tenant-scoped evidence, durable workflows, and auditable reports.
 
 Built as a deployable proof of concept for [`CASE_STUDY.md`](CASE_STUDY.md), LedgerFlow investigates duplicate invoices, payment failures, timeouts, and configuration errors. The canonical walkthrough uses the synthetic `ACME-482` incident.
