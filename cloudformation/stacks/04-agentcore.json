@@ -9,6 +9,7 @@
     {"Key": "ContextCompactionLlmEnabled", "Value": "${CONTEXT_COMPACTION_LLM_ENABLED}", "Default": "ENABLED"},
     {"Key": "ContextTokenBudget", "Value": "${CONTEXT_TOKEN_BUDGET}", "Default": "8000"},
     {"Key": "ContextCompactionReservedTokens", "Value": "${CONTEXT_COMPACTION_RESERVED_TOKENS}", "Default": "1200"},
+    {"Key": "EvidenceLogLimit", "Value": "${EVIDENCE_LOG_LIMIT}", "Default": "500"},
     {"Key": "FailureInjectionEnabled", "Value": "${FAILURE_INJECTION_ENABLED}", "Default": "DISABLED"},
     {"Key": "RuntimeExecutionRoleArn", "Value": "${CF_OUT_RuntimeExecutionRoleArn}"},
     {"Key": "GatewayExecutionRoleArn", "Value": "${CF_OUT_GatewayExecutionRoleArn}"},

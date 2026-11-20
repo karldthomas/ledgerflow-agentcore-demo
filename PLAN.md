@@ -10,11 +10,12 @@ bounded Bedrock planning/report synthesis, schema-driven evidence claims, and
 regression tests. The development resources are deployed; the first Cognito
 admin remains an explicit bootstrap input.
 
-The current deterministic seed contains 21 evidence documents, 112 incidents,
-212 customers, 215 invoices, 5,030 application logs, and 42 deployments. The
-tenant_acme slice contains the original ACME-482/ACME-483 records plus 12
-additional cases spanning timeout, payment-failure, configuration-error, and
-duplicate-invoice paths.
+The current deterministic seed contains 21 evidence documents, 113 incidents,
+213 customers, 231 invoices, 5,150 application logs, and 43 deployments. The
+tenant_acme slice contains the original ACME-482/ACME-483 records plus 13
+additional cases spanning timeout, payment-failure, configuration-error,
+duplicate-invoice, and context-pressure paths. ACME-496 / INC-1059 is the
+dedicated compaction exercise.
 
 ## Objective
 
@@ -970,10 +971,10 @@ The POC is complete when it can:
 - Extended `IncidentReport` with `evidence_schema_version` and
   `evidence_claims`; model synthesis now validates claim types, statements, and
   evidence IDs against the authorized packet.
-- Added 12 coherent `tenant_acme` cases (`ACME-484` through `ACME-495`,
-  `INC-1047` through `INC-1058`) with matching invoices, logs, deployments,
-  and four additional runbooks. The expanded seed is 21 documents, 112
-  incidents, 212 customers, 215 invoices, 5,030 logs, and 42 deployments.
+- Added 13 coherent `tenant_acme` cases (`ACME-484` through `ACME-496`,
+  `INC-1047` through `INC-1059`) with matching invoices, logs, deployments,
+  and four additional runbooks. The expanded seed is 21 documents, 113
+  incidents, 213 customers, 231 invoices, 5,150 logs, and 43 deployments.
 - Added an Evidence reasoning section to the web console and deployed the
   updated runtime, console artifact, and AWS fixture data.
 - Verification: `pytest -q` — 17 tests passed; Python compilation passed; a

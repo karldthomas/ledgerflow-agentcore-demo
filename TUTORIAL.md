@@ -444,6 +444,7 @@ ACME-487 / INC-1050  duplicate invoice after a changed retry key
 ACME-488 / INC-1051  reconciled timeout with provider success
 ACME-490 / INC-1053  provider payment failure
 ACME-495 / INC-1058  timeout followed by a safe retry
+ACME-496 / INC-1059  high-volume retry history for context-pressure compaction
 ```
 
 ## 5. Implement the investigation flow
@@ -569,7 +570,8 @@ ledgerflow/context_compaction.py
 context, and saves a `context_compaction` checkpoint. It then passes that
 context to `ledgerflow/reasoning.py`, which sends the bounded JSON packet to
 Bedrock. The manifest records the context digest, selected evidence IDs,
-omitted-record counts, and token estimate without duplicating the full prompt.
+full versus citation-only record counts, omitted-record counts, and token
+estimate without duplicating the full prompt.
 
 The current implementation uses `ledgerflow.context.v1` and
 `ledgerflow.compaction.v1`. The default working-context budget is 8,000
@@ -637,11 +639,54 @@ authority for permissions, evidence identity, or durable state.
 
 ### Forced compaction exercise
 
-Set a small `CONTEXT_TOKEN_BUDGET`, run an investigation with verbose logs,
-and inspect the `context_compaction` timeline stage. The reasoning inspector
-shows the selected count, omitted count, digest, and token estimate. The
-execution log retains the structured checkpoint payload, but does not expose
-private chain-of-thought.
+The seed includes a deterministic case that exercises this behavior without
+changing a CloudFormation template. `ACME-496` / `INC-1059` has 120 verbose
+application-log records and 16 related invoices. The runtime normally collects
+up to 500 logs per investigation, so the case supplies enough authorized
+evidence to require compaction while remaining tenant-scoped.
+
+Run it from the deployed console with:
+
+```text
+Customer ID:       ACME-496
+Incident ID:       INC-1059
+Tenant:            tenant_acme
+Investigation request:
+Investigate the high-volume retry history and explain what was retained or reduced.
+```
+
+With the default deployment settings (`EVIDENCE_LOG_LIMIT=500`,
+`CONTEXT_TOKEN_BUDGET=8000`, and `CONTEXT_COMPACTION_RESERVED_TOKENS=1200`),
+the deterministic compactor produces the following reproducible accounting:
+
+```text
+input_evidence_count:          138
+selected_evidence_count:       138
+full_evidence_count:            18
+reference_only_evidence_count: 120
+omitted_evidence_count:          0
+token_count:                 about 6785 / 8000
+```
+
+“Full” records contain bounded source fields. “Reference-only” records retain
+their source ID and kind but not the verbose payload, so the report can still
+cite every selected record without putting every log body into the model
+context. The compactor admits mandatory citation IDs first, then upgrades as
+many of them as fit, which prevents an early verbose record from crowding out
+a later required citation.
+
+To inspect the result, hover over **Compact context** in the timeline. Its
+results popover shows input, full, citation-only, omitted, and token counts.
+The **Reasoning inspector** shows the safe structured compaction event, and
+**Open log** shows the bounded execution payload and evidence-ID samples. Raw
+prompt bodies and private chain-of-thought are intentionally not exposed.
+
+The optional Bedrock semantic pass runs after this deterministic selection. It
+may group repeated retry observations and add cited relationships or
+hypotheses, but invalid or unavailable output falls back to the deterministic
+packet. To demonstrate a hard budget failure, lower the token budget until the
+mandatory reference IDs themselves cannot fit; the runtime records the
+degraded/fallback outcome rather than silently dropping a required citation.
 
 ## 8. Hydrate state after interruption
 
@@ -805,7 +850,7 @@ The report also includes a machine-readable evidence contract:
 To exercise a different branch, submit an investigation for `ACME-488` for a
 reconciled timeout or `ACME-485` for a configuration failure through the
 deployed console or API. The deployed tenant has the same cases under
-`INC-1047` through `INC-1058`.
+`INC-1047` through `INC-1059`.
 
 ## Web console
 

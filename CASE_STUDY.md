@@ -192,11 +192,12 @@ The agent must discover this root cause through retrieval and investigation rath
 
 The table describes the original benchmark target. The current deterministic
 implementation exceeds the incident, customer, invoice, log, and deployment
-targets: it seeds 21 evidence documents, 112 incidents, 212 customers, 215
-invoices, 5,030 application logs, and 42 deployments. The `tenant_acme` test
+targets: it seeds 21 evidence documents, 113 incidents, 213 customers, 231
+invoices, 5,150 application logs, and 43 deployments. The `tenant_acme` test
 slice includes the baseline ACME-482/ACME-483 records plus ACME-484 through
-ACME-495, covering multiple timeout, failure, configuration, and duplicate
-invoice outcomes.
+ACME-496, covering multiple timeout, failure, configuration, duplicate
+invoice, and context-pressure outcomes. ACME-496 / INC-1059 is the dedicated
+high-volume case used to demonstrate bounded context compaction.
 
 ## Example Incident Record
 

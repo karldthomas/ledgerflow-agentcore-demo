@@ -40,6 +40,12 @@ Parameters:
     MinValue: 0
     MaxValue: 50000
     Description: Budget reserved for the optional semantic compaction summary.
+  EvidenceLogLimit:
+    Type: Number
+    Default: 500
+    MinValue: 1
+    MaxValue: 500
+    Description: Maximum application-log records collected for one investigation.
   FailureInjectionEnabled:
     Type: String
     Default: DISABLED
@@ -504,6 +510,7 @@ Resources:
         CONTEXT_COMPACTION_LLM_ENABLED: !Ref ContextCompactionLlmEnabled
         CONTEXT_TOKEN_BUDGET: !Ref ContextTokenBudget
         CONTEXT_COMPACTION_RESERVED_TOKENS: !Ref ContextCompactionReservedTokens
+        EVIDENCE_LOG_LIMIT: !Ref EvidenceLogLimit
         MODEL_ID: !Ref ReasoningModelId
         MODEL_REASONING_ENABLED: !Ref EnableModelReasoning
         LEDGERFLOW_ENABLE_FAILURE_INJECTION: !Ref FailureInjectionEnabled

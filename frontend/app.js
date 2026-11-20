@@ -19,6 +19,7 @@
     get_deployments: "deployment_lookup",
     search_evidence: "retrieval",
     memory_lookup: "memory_lookup",
+    context_compaction: "context_compaction",
     reasoning_compaction: "context_compaction",
     reasoning_plan: "started",
     reasoning_synthesis: "report_synthesis",
@@ -200,6 +201,15 @@
     if (payload.preview_truncated) facts.push("Preview limited to the first 4 records");
     if (payload.model_id) facts.push(`Model: ${payload.model_id}`);
     if (payload.stop_reason) facts.push(`Stop reason: ${payload.stop_reason}`);
+    if (payload.input_evidence_count !== undefined) facts.push(`Context input: ${payload.input_evidence_count} evidence records`);
+    if (payload.selected_evidence_count !== undefined) facts.push(`Context selected: ${payload.selected_evidence_count}`);
+    if (payload.full_evidence_count !== undefined) facts.push(`Full records: ${payload.full_evidence_count}`);
+    if (payload.reference_only_evidence_count !== undefined) facts.push(`Citation-only: ${payload.reference_only_evidence_count}`);
+    if (payload.omitted_evidence_count !== undefined) facts.push(`Omitted: ${payload.omitted_evidence_count}`);
+    if (payload.token_count !== undefined && payload.budget_tokens !== undefined) facts.push(`Budget: ${payload.token_count} / ${payload.budget_tokens} tokens`);
+    if (payload.input_token_count !== undefined && payload.budget_tokens === undefined) facts.push(`Input: ${payload.input_token_count} tokens`);
+    if (payload.mode) facts.push(`Mode: ${payload.mode}`);
+    if (payload.fallback_used) facts.push("Deterministic fallback used");
     if (payload.latency_ms !== undefined) facts.push(`Latency: ${payload.latency_ms} ms`);
     if (payload.deployment_version) facts.push(`Version: ${payload.deployment_version}`);
     if (payload.confidence !== undefined && Number.isFinite(Number(payload.confidence))) facts.push(`Confidence: ${Math.round(Number(payload.confidence) * 100)}%`);
@@ -239,6 +249,20 @@
     return `<div class="flow-result-preview"><div class="flow-result-heading">${heading}${payload.preview_truncated ? " · preview limited" : ""}</div><div class="flow-result-records">${preview.map((record, index) => { const label = record.IncidentId || record.InvoiceId || record.LogId || record.DeploymentId || record.memory_id || record.id || record.title || `Record ${index + 1}`; return `<div class="flow-result-record"><div class="flow-result-record-label">${escapeHtml(label)}</div><pre>${escapeHtml(JSON.stringify(record, null, 2))}</pre></div>`; }).join("")}</div></div>`;
   }
 
+  function contextCompactionSummaryMarkup(events) {
+    const compaction = events.slice().reverse().find((item) => {
+      const payload = item.payload || {};
+      return payload.selected_evidence_count !== undefined || payload.input_evidence_count !== undefined;
+    });
+    if (!compaction) return "";
+    const payload = compaction.payload || {};
+    const fallback = events.some((item) => (item.payload || {}).fallback_used);
+    const tokenCount = payload.token_count ?? payload.input_token_count;
+    const budget = payload.budget_tokens;
+    const tokenLabel = tokenCount !== undefined && budget !== undefined ? `${tokenCount} / ${budget} tokens` : tokenCount !== undefined ? `${tokenCount} input tokens` : "token usage unavailable";
+    return `<div class="flow-hover-facts context-compaction-summary"><span>${payload.input_evidence_count ?? "—"} input records</span><span>${payload.full_evidence_count ?? "—"} full records</span><span>${payload.reference_only_evidence_count ?? "—"} citation-only</span><span>${payload.omitted_evidence_count ?? "—"} omitted</span><span>${tokenLabel}</span>${fallback ? "<span>LLM fallback used</span>" : ""}</div>`;
+  }
+
   function flowEventMarkup(item) {
     const payload = item.payload || {};
     const title = item.event_type === "tool_call" && payload.tool ? payload.tool : item.event_type || item.step;
@@ -259,7 +283,7 @@
     const stateLabel = failed ? "Needs review" : stageEvents.length && completed === stageEvents.length ? "Completed" : stageEvents.length ? "Observed" : "Waiting";
     const eventLabel = `${stageEvents.length} event${stageEvents.length === 1 ? "" : "s"}`;
     const eventTrace = stageEvents.length ? stageEvents.map(flowEventMarkup).join("") : `<div class="flow-event-empty">No events have been recorded for this stage yet.</div>`;
-    return `<div class="flow-hover-heading"><div><p class="eyebrow">TIMELINE RESULTS</p><strong>${escapeHtml(FLOW.find(([key]) => key === stageKey)?.[1] || stageKey)}</strong></div><span class="flow-hover-status ${failed ? "failed" : ""}">${escapeHtml(stateLabel)}</span></div><p class="flow-hover-copy">${escapeHtml(meta.description || "Workflow activity for this stage.")}</p><div class="flow-hover-facts"><span>${eventLabel}</span><span>${completed} completed</span><span>Source: ${escapeHtml(meta.source || "workflow")}</span>${resultValues.length ? `<span>${resultCount} result${resultCount === 1 ? "" : "s"}</span>` : ""}</div><div class="flow-hover-operation"><span>Operation</span><code>${escapeHtml(meta.operation || "—")}</code>${signals.length ? `<span class="flow-hover-signals">Observed: ${escapeHtml(signals.join(", "))}</span>` : ""}${latest ? `<span class="flow-hover-time">Last activity ${escapeHtml(eventTime(latest).toLocaleTimeString())}</span>` : ""}</div><div class="flow-event-trace"><div class="flow-event-trace-heading"><span>Event trace + returned data</span><span>${stageEvents.length} raw event${stageEvents.length === 1 ? "" : "s"}</span></div><div class="flow-event-list">${eventTrace}</div></div>`;
+    return `<div class="flow-hover-heading"><div><p class="eyebrow">TIMELINE RESULTS</p><strong>${escapeHtml(FLOW.find(([key]) => key === stageKey)?.[1] || stageKey)}</strong></div><span class="flow-hover-status ${failed ? "failed" : ""}">${escapeHtml(stateLabel)}</span></div><p class="flow-hover-copy">${escapeHtml(meta.description || "Workflow activity for this stage.")}</p><div class="flow-hover-facts"><span>${eventLabel}</span><span>${completed} completed</span><span>Source: ${escapeHtml(meta.source || "workflow")}</span>${resultValues.length ? `<span>${resultCount} result${resultCount === 1 ? "" : "s"}</span>` : ""}</div>${stageKey === "context_compaction" ? contextCompactionSummaryMarkup(stageEvents) : ""}<div class="flow-hover-operation"><span>Operation</span><code>${escapeHtml(meta.operation || "—")}</code>${signals.length ? `<span class="flow-hover-signals">Observed: ${escapeHtml(signals.join(", "))}</span>` : ""}${latest ? `<span class="flow-hover-time">Last activity ${escapeHtml(eventTime(latest).toLocaleTimeString())}</span>` : ""}</div><div class="flow-event-trace"><div class="flow-event-trace-heading"><span>Event trace + returned data</span><span>${stageEvents.length} raw event${stageEvents.length === 1 ? "" : "s"}</span></div><div class="flow-event-list">${eventTrace}</div></div>`;
   }
 
   let flowHideTimer = null;
@@ -364,7 +388,7 @@
 
   function reasoningTitle(item) {
     if (item.event_type === "reasoning_plan") return "Plan summary";
-    if (item.event_type === "reasoning_compaction") return "Context compaction";
+    if (["reasoning_compaction", "context_compaction"].includes(item.event_type)) return "Context compaction";
     return "Synthesis summary";
   }
 
@@ -376,9 +400,9 @@
       $("event-list").innerHTML = state.events.slice().reverse().map((item, reverseIndex) => eventRowMarkup(item, state.events.length - reverseIndex - 1)).join("");
       bindEventRows($("event-list"));
     }
-    const llm = state.events.filter((item) => ["reasoning_plan", "reasoning_compaction", "reasoning_synthesis"].includes(item.event_type));
+    const llm = state.events.filter((item) => ["reasoning_plan", "reasoning_compaction", "context_compaction", "reasoning_synthesis"].includes(item.event_type));
     $("inspector-count").textContent = llm.length;
-    if (!llm.length) { $("inspector").innerHTML = "<span>Safe planning and synthesis summaries will appear here for every authenticated operator.</span>"; return; }
+    if (!llm.length) { $("inspector").innerHTML = "<span>Safe planning, context compaction, and synthesis summaries will appear here for every authenticated operator.</span>"; return; }
     $("inspector").classList.remove("empty-detail");
     $("inspector").innerHTML = llm.map((item) => `<div class="inspector-card"><div class="inspector-title"><span>${escapeHtml(reasoningTitle(item))}</span><span>${escapeHtml(item.status)}</span></div><pre>${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre></div>`).join("");
   }

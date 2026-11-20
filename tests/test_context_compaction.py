@@ -10,6 +10,8 @@ from ledgerflow.context_compaction import (
     ContextInvariantError,
     ContextSummarizationError,
 )
+from ledgerflow.db import Database
+from ledgerflow.evidence_reasoning import build_evidence_report
 from ledgerflow.models import IncidentReport
 
 
@@ -117,6 +119,59 @@ def test_compactor_rejects_cross_tenant_evidence():
             memories=[],
             tenant_id="tenant_acme",
         )
+
+
+def test_context_pressure_fixture_keeps_citations_and_compacts_verbose_logs():
+    db = Database()
+    counts = db.seed()
+    assert counts["application_logs"] == 5150
+
+    incident = dict(db.query_one("SELECT * FROM incidents WHERE customer_id = ?", ("ACME-496",)))
+    invoices = [dict(row) for row in db.query_all("SELECT * FROM invoices WHERE customer_id = ?", ("ACME-496",))]
+    logs = [
+        dict(row)
+        for row in db.query_all(
+            "SELECT * FROM application_logs WHERE customer_id = ? ORDER BY timestamp LIMIT 500",
+            ("ACME-496",),
+        )
+    ]
+    deployments = [
+        dict(row)
+        for row in db.query_all(
+            "SELECT * FROM deployments WHERE tenant_id = ? AND version = ?",
+            ("tenant_acme", "3.8.4"),
+        )
+    ]
+    report = build_evidence_report(
+        incident=incident,
+        invoices=invoices,
+        logs=logs,
+        deployments=deployments,
+        vectors=[],
+        tenant_id="tenant_acme",
+    )
+    evidence = [
+        {"id": incident["incident_id"], "kind": "incident", "data": incident},
+        *[{"id": item["invoice_id"], "kind": "invoice", "data": item} for item in invoices],
+        *[{"id": item["log_id"], "kind": "application_log", "data": item} for item in logs],
+        *[{"id": item["deployment_id"], "kind": "deployment", "data": item} for item in deployments],
+    ]
+
+    context = ContextCompactor(max_tokens=8000, reserved_tokens=1200).compact(
+        base_report=report,
+        evidence=evidence,
+        memories=[],
+        tenant_id="tenant_acme",
+    )
+    manifest = context.to_manifest()
+
+    assert len(logs) == 120
+    assert manifest["input_evidence_count"] == 138
+    assert manifest["selected_evidence_count"] == 138
+    assert manifest["full_evidence_count"] < manifest["selected_evidence_count"]
+    assert manifest["reference_only_evidence_count"] >= 100
+    assert manifest["omitted_evidence_count"] == 0
+    assert context.token_count <= context.budget_tokens
 
 
 class _SummarizerClient:

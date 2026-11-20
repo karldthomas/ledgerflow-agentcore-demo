@@ -8,10 +8,13 @@ It is intentionally more specific than `PLAN.md`: it defines stack boundaries,
 the value-passing protocol, artifact flow, deployment order, validation, and
 rollback behavior.
 
-The current development seed contains 21 evidence documents, 112 incidents,
-212 customers, 215 invoices, 5,030 application logs, and 42 deployments. The
+The current development seed contains 21 evidence documents, 113 incidents,
+213 customers, 231 invoices, 5,150 application logs, and 43 deployments. The
 original ACME-482 walkthrough remains the baseline smoke test; the expanded
-tenant_acme cases are `ACME-484` through `ACME-495`.
+tenant_acme cases are `ACME-484` through `ACME-496`. `ACME-496` / `INC-1059`
+is a dedicated context-pressure case with 120 verbose logs and 16 related
+invoices; it produces citation-only evidence under the default compaction
+budget.
 
 The deployed console URL is environment-specific and is printed by the
 deployment script after Stack 07 completes; it requires Cognito
@@ -555,6 +558,7 @@ EnableModelReasoning = ${ENABLE_MODEL_REASONING} (default DISABLED)
 ContextCompactionLlmEnabled = ${CONTEXT_COMPACTION_LLM_ENABLED} (default ENABLED)
 ContextTokenBudget = ${CONTEXT_TOKEN_BUDGET} (default 8000)
 ContextCompactionReservedTokens = ${CONTEXT_COMPACTION_RESERVED_TOKENS} (default 1200)
+EvidenceLogLimit = ${EVIDENCE_LOG_LIMIT} (default 500; maximum 500)
 FailureInjectionEnabled = ${FAILURE_INJECTION_ENABLED} (default DISABLED; legacy direct-payload compatibility guard)
 RuntimeExecutionRoleArn = ${CF_OUT_RuntimeExecutionRoleArn}
 GatewayExecutionRoleArn = ${CF_OUT_GatewayExecutionRoleArn}
@@ -885,11 +889,11 @@ The expected deterministic seed counts after ingestion are:
 
 ```text
 documents:         21
-customers:        212
-incidents:        112
-invoices:         215
-application_logs: 5030
-deployments:       42
+customers:        213
+incidents:        113
+invoices:         231
+application_logs: 5150
+deployments:       43
 ```
 
 ### Step 5 — Deploy tools
@@ -1156,9 +1160,11 @@ production until the cleanup process is proven.
 - [ ] Gateway policies pass in `LOG_ONLY` before `ENFORCE`/`ACTIVE`.
 - [ ] ACME-482 baseline smoke test passes.
 - [ ] At least one expanded synthetic case, such as ACME-487 / INC-1050, passes.
+- [ ] ACME-496 / INC-1059 shows context pressure with selected, full,
+      citation-only, and omitted evidence counts in the console.
 - [ ] Reports contain `ledgerflow.evidence.v2` typed evidence claims.
-- [ ] The deterministic seed contains 21 documents, 112 incidents, 212 customers,
-      215 invoices, 5,030 logs, and 42 deployments.
+- [ ] The deterministic seed contains 21 documents, 113 incidents, 213 customers,
+      231 invoices, 5,150 logs, and 43 deployments.
 - [ ] Crash recovery test passes.
 - [ ] No financial write tool is deployed.
 - [ ] CloudFormation change sets are used for production updates.

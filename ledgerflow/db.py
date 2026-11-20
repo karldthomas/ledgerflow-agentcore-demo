@@ -128,6 +128,10 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+CONTEXT_PRESSURE_LOG_COUNT = 120
+CONTEXT_PRESSURE_INVOICE_GROUPS = 8
+
+
 # Extra tenant_acme cases keep the deployed demo useful after the original
 # ACME-482 walkthrough.  Each case has matching invoices and logs generated
 # below, so the evidence graph is coherent instead of being a collection of
@@ -252,6 +256,16 @@ EXTRA_ACME_CASES: tuple[dict[str, str], ...] = (
         "deployment_version": "3.8.2",
         "status": "closed",
         "scenario": "timeout_reconciled",
+    },
+    {
+        "customer_id": "ACME-496",
+        "incident_id": "INC-1059",
+        "category": "duplicate_invoice",
+        "severity": "high",
+        "description": "A high-volume retry history intentionally exercises context compaction.",
+        "deployment_version": "3.8.4",
+        "status": "open",
+        "scenario": "context_pressure",
     },
 )
 
@@ -471,6 +485,25 @@ class Database:
             ("INV-8850", "CONFIG-77", "tenant_config", "SUB-CONFIG-77", "REN-2026-11", 2900, "failed", "2026-11-15T13:42:03+00:00"),
         ]
         for offset, case in enumerate(EXTRA_ACME_CASES):
+            if case["scenario"] == "context_pressure":
+                invoice_base = 9500
+                for group_index in range(CONTEXT_PRESSURE_INVOICE_GROUPS):
+                    renewal_id = f"REN-2026-CP-{group_index + 1:02d}"
+                    amount_cents = 7900 + (group_index % 8) * 300
+                    for duplicate_index in range(2):
+                        rows.append(
+                            (
+                                f"INV-{invoice_base + (group_index * 2) + duplicate_index}",
+                                case["customer_id"],
+                                "tenant_acme",
+                                f"SUB-{case['customer_id']}",
+                                renewal_id,
+                                amount_cents,
+                                "issued",
+                                f"2026-11-16T20:{group_index:02d}:0{3 + duplicate_index}+00:00",
+                            )
+                        )
+                continue
             renewal_id = f"REN-2026-{12 + (offset % 3):02d}"
             amount_cents = 7900 + (offset * 300)
             issued_at = f"2026-11-16T{(8 + offset):02d}:42:03+00:00"
@@ -608,6 +641,79 @@ class Database:
             customer_id = case["customer_id"]
             base_time = datetime(2026, 11, 16, 8 + offset, 42, 0, tzinfo=timezone.utc)
             original_key = f"pay_{customer_id.lower().replace('-', '_')}"
+            if case["scenario"] == "context_pressure":
+                context_base = datetime(2026, 11, 16, 20, 0, 0, tzinfo=timezone.utc)
+                rows.extend(
+                    [
+                        (
+                            f"LOG-{customer_id}-001",
+                            customer_id,
+                            "tenant_acme",
+                            context_base.isoformat(),
+                            "payment-service",
+                            "payment_attempt",
+                            json.dumps({"payment_id": original_key, "idempotency_key": original_key, "amount_cents": 7900}),
+                        ),
+                        (
+                            f"LOG-{customer_id}-002",
+                            customer_id,
+                            "tenant_acme",
+                            (context_base + timedelta(seconds=2)).isoformat(),
+                            "payment-retry-handler",
+                            "retry_attempt",
+                            json.dumps(
+                                {
+                                    "original_idempotency_key": original_key,
+                                    "retry_idempotency_key": f"{original_key}_retry",
+                                    "error": "PaymentTimeoutException",
+                                    "attempt": 2,
+                                }
+                            ),
+                        ),
+                        (
+                            f"LOG-{customer_id}-003",
+                            customer_id,
+                            "tenant_acme",
+                            (context_base + timedelta(seconds=5)).isoformat(),
+                            "invoice-service",
+                            "invoice_created",
+                            json.dumps({"invoice_id": "INV-9500", "renewal_id": "REN-2026-CP-01", "payment_id": original_key}),
+                        ),
+                        (
+                            f"LOG-{customer_id}-004",
+                            customer_id,
+                            "tenant_acme",
+                            (context_base + timedelta(seconds=7)).isoformat(),
+                            "invoice-service",
+                            "invoice_created",
+                            json.dumps({"invoice_id": "INV-9501", "renewal_id": "REN-2026-CP-01", "payment_id": f"{original_key}_retry"}),
+                        ),
+                    ]
+                )
+                for sequence in range(5, CONTEXT_PRESSURE_LOG_COUNT + 1):
+                    timestamp = context_base + timedelta(seconds=sequence * 3)
+                    rows.append(
+                        (
+                            f"LOG-{customer_id}-{sequence:03d}",
+                            customer_id,
+                            "tenant_acme",
+                            timestamp.isoformat(),
+                            "payment-observer" if sequence % 2 else "trace-collector",
+                            "payment_observed" if sequence % 2 else "trace_checkpoint",
+                            json.dumps(
+                                {
+                                    "payment_id": f"{original_key}-{sequence:04d}",
+                                    "trace_id": f"trace-{sequence:05d}",
+                                    "sequence": sequence,
+                                    "diagnostic": (
+                                        "synthetic context-pressure observation "
+                                        + (f"detail-{sequence:03d} " * 70).strip()
+                                    ),
+                                }
+                            ),
+                        )
+                    )
+                continue
             rows.append(
                 (
                     f"LOG-{customer_id}-01",

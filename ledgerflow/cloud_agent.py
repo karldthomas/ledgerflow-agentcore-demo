@@ -82,6 +82,10 @@ class CloudInvestigationHandler:
             max_tokens=context_token_budget,
             reserved_tokens=reserved_tokens,
         )
+        try:
+            self.evidence_log_limit = min(500, max(1, int(os.environ.get("EVIDENCE_LOG_LIMIT", "500"))))
+        except ValueError:
+            self.evidence_log_limit = 500
         self.context_summarizer: BedrockContextSummarizer | None = None
         if os.environ.get("MODEL_REASONING_ENABLED", "DISABLED").upper() == "ENABLED":
             model_id = os.environ.get("MODEL_ID", "").strip()
@@ -195,8 +199,14 @@ class CloudInvestigationHandler:
             status,
             {
                 "model_id": event.get("model_id"),
+                "mode": "llm",
                 "context_digest": event.get("context_digest"),
                 "input_token_count": event.get("input_token_count"),
+                "input_evidence_count": event.get("input_evidence_count"),
+                "selected_evidence_count": event.get("selected_evidence_count"),
+                "full_evidence_count": event.get("full_evidence_count"),
+                "reference_only_evidence_count": event.get("reference_only_evidence_count"),
+                "omitted_evidence_count": event.get("omitted_evidence_count"),
                 "prompt_redacted": True,
             },
             visibility="operator",
@@ -921,7 +931,14 @@ class CloudInvestigationHandler:
             if "log_lookup" in completed_steps and isinstance(state.get("logs"), list):
                 logs = state["logs"]
             else:
-                logs = self._call("ApplicationLogs", "get_application_logs", tenant_id, customer_id=customer_id, limit=100) if plan.include_logs else []
+                log_limit = getattr(self, "evidence_log_limit", 500)
+                logs = self._call(
+                    "ApplicationLogs",
+                    "get_application_logs",
+                    tenant_id,
+                    customer_id=customer_id,
+                    limit=log_limit,
+                ) if plan.include_logs else []
                 state["logs"] = logs
                 self._save_stage(
                     workflow_id=workflow_id,

@@ -8,6 +8,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY ledgerflow/__init__.py \
      ledgerflow/cloud_agent.py \
+     ledgerflow/context_compaction.py \
      ledgerflow/evidence_reasoning.py \
      ledgerflow/gateway.py \
      ledgerflow/models.py \

@@ -180,7 +180,25 @@ class CompactedContext:
     budget_tokens: int
     digest: str
 
+    def _evidence_coverage(self) -> dict[str, Any]:
+        selected_ids = [str(item.get("id") or "") for item in self.evidence]
+        full_ids = [
+            str(item.get("id") or "")
+            for item in self.evidence
+            if not (isinstance(item.get("data"), Mapping) and item["data"].get("reference_only") is True)
+        ]
+        full_id_set = set(full_ids)
+        reference_only_ids = [item_id for item_id in selected_ids if item_id not in full_id_set]
+        return {
+            "input_evidence_count": len(selected_ids) + self.omitted_evidence_count,
+            "selected_evidence_count": len(selected_ids),
+            "full_evidence_count": len(full_ids),
+            "reference_only_evidence_count": len(reference_only_ids),
+            "reference_only_evidence_sample": reference_only_ids[:25],
+        }
+
     def _payload(self, *, include_digest: bool = True) -> dict[str, Any]:
+        coverage = self._evidence_coverage()
         return {
             "context_schema_version": self.schema_version,
             "compaction": {
@@ -204,6 +222,7 @@ class CompactedContext:
             "memories": self.memories,
             "citable_evidence_ids": self.citable_evidence_ids,
             "evidence_coverage": {
+                **coverage,
                 "required_evidence_ids": self.required_evidence_ids,
                 "omitted_evidence_count": self.omitted_evidence_count,
                 "omitted_evidence_sample": self.omitted_evidence_sample,
@@ -236,6 +255,7 @@ class CompactedContext:
     def to_manifest(self) -> dict[str, Any]:
         """Return bounded checkpoint metadata without copying the prompt."""
 
+        coverage = self._evidence_coverage()
         return {
             "schema_version": self.schema_version,
             "compaction_version": self.compaction_version,
@@ -243,6 +263,7 @@ class CompactedContext:
             "token_count": self.token_count,
             "budget_tokens": self.budget_tokens,
             "selected_evidence_ids": list(self.citable_evidence_ids),
+            **coverage,
             "required_evidence_ids": list(self.required_evidence_ids),
             "omitted_evidence_count": self.omitted_evidence_count,
             "omitted_evidence_sample": list(self.omitted_evidence_sample),
@@ -297,12 +318,13 @@ class ContextCompactor:
         selected: list[dict[str, Any]] = []
         selected_ids: set[str] = set()
 
-        # Required citations are admitted before optional evidence. If their
-        # full record cannot fit, retain a reference-only entry; if even the
-        # references cannot fit, fail closed instead of silently losing them.
+        # Required citations are admitted as references first. We then upgrade
+        # as many of those references to full records as the budget allows.
+        # This prevents an early full record from crowding out a later
+        # mandatory citation and makes reference-only compaction deterministic.
         for evidence_id in required_ids:
             candidate = evidence_by_id.get(evidence_id)
-            entry = candidate.preview() if candidate else {
+            entry = candidate.preview(reference_only=True) if candidate else {
                 "id": evidence_id,
                 "kind": "evidence_reference",
                 "data": {"reference_only": True},
@@ -317,22 +339,28 @@ class ContextCompactor:
                 unresolved_questions=report.get("unresolved_questions", []),
                 failed_hypotheses=workflow.get("failed_hypotheses", []),
             ):
-                entry = candidate.preview(reference_only=True) if candidate else entry
-                if not self._fits(
-                    report=report,
-                    claims=claims,
-                    invariants=invariants,
-                    workflow=workflow,
-                    evidence=[*selected, entry],
-                    memories=[],
-                    unresolved_questions=report.get("unresolved_questions", []),
-                    failed_hypotheses=workflow.get("failed_hypotheses", []),
-                ):
-                    raise ContextInvariantError(
-                        f"mandatory evidence reference {evidence_id} exceeds the context budget"
-                    )
+                raise ContextInvariantError(f"mandatory evidence reference {evidence_id} exceeds the context budget")
             selected.append(entry)
             selected_ids.add(evidence_id)
+
+        for index, evidence_id in enumerate(required_ids):
+            candidate = evidence_by_id.get(evidence_id)
+            if candidate is None:
+                continue
+            entry = candidate.preview()
+            proposed = [*selected]
+            proposed[index] = entry
+            if self._fits(
+                report=report,
+                claims=claims,
+                invariants=invariants,
+                workflow=workflow,
+                evidence=proposed,
+                memories=[],
+                unresolved_questions=report.get("unresolved_questions", []),
+                failed_hypotheses=workflow.get("failed_hypotheses", []),
+            ):
+                selected[index] = entry
 
         optional_evidence = [
             candidate
@@ -611,6 +639,13 @@ class ContextCompactor:
         failed_hypotheses: Any,
         semantic_summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        selected_ids = [str(item.get("id") or "") for item in evidence]
+        full_ids = [
+            str(item.get("id") or "")
+            for item in evidence
+            if not (isinstance(item.get("data"), Mapping) and item["data"].get("reference_only") is True)
+        ]
+        reference_only_ids = [item_id for item_id in selected_ids if item_id not in set(full_ids)]
         return {
             "context_schema_version": CONTEXT_SCHEMA_VERSION,
             "compaction": {
@@ -631,6 +666,11 @@ class ContextCompactor:
             "citable_evidence_ids": citable_ids,
             "evidence_coverage": {
                 "required_evidence_ids": required_ids,
+                "input_evidence_count": len(selected_ids) + omitted_evidence_count,
+                "selected_evidence_count": len(selected_ids),
+                "full_evidence_count": len(full_ids),
+                "reference_only_evidence_count": len(reference_only_ids),
+                "reference_only_evidence_sample": reference_only_ids[:25],
                 "omitted_evidence_count": omitted_evidence_count,
                 "omitted_evidence_sample": omitted_evidence_sample,
                 "omitted_memory_count": omitted_memory_count,
@@ -810,6 +850,7 @@ class BedrockContextSummarizer:
             prompt_version_arn = self.prompt_resolver.resolve()
         except Exception as exc:
             raise ContextSummarizationError(f"context compaction prompt could not be resolved: {exc}") from exc
+        manifest = context.to_manifest()
         user = json.dumps(
             {
                 "context": context.to_prompt_dict(),
@@ -831,6 +872,11 @@ class BedrockContextSummarizer:
                 "prompt_version_arn": prompt_version_arn,
                 "context_digest": context.digest,
                 "input_token_count": context.token_count,
+                "input_evidence_count": manifest["input_evidence_count"],
+                "selected_evidence_count": manifest["selected_evidence_count"],
+                "full_evidence_count": manifest["full_evidence_count"],
+                "reference_only_evidence_count": manifest["reference_only_evidence_count"],
+                "omitted_evidence_count": manifest["omitted_evidence_count"],
                 "prompt_variables_preview": user[:6000],
             }
         )
@@ -853,6 +899,11 @@ class BedrockContextSummarizer:
                 "prompt_version_arn": prompt_version_arn,
                 "context_digest": enriched.digest,
                 "input_token_count": enriched.token_count,
+                "input_evidence_count": manifest["input_evidence_count"],
+                "selected_evidence_count": manifest["selected_evidence_count"],
+                "full_evidence_count": manifest["full_evidence_count"],
+                "reference_only_evidence_count": manifest["reference_only_evidence_count"],
+                "omitted_evidence_count": manifest["omitted_evidence_count"],
                 "stop_reason": response.get("stopReason"),
             }
         )
