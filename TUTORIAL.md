@@ -50,6 +50,70 @@ timeouts, payment failures, configuration errors, and duplicate invoices.
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Operational deployment configuration and manual procedures |
 | [`README.md`](README.md) | Concise project overview and quick-start commands |
 
+## AgentCore concepts at a glance
+
+AgentCore is a set of managed building blocks, not an autonomous decision
+maker. LedgerFlow composes those services with an application-owned workflow,
+retrieval policy, evidence contract, and audit layer.
+
+| Concept | What it provides | How LedgerFlow uses it |
+| --- | --- | --- |
+| Runtime | Hosted execution, sessions, endpoints, and runtime isolation | Runs the Python investigation handler and keeps the model inside a bounded workflow |
+| Gateway | A controlled front door for external tools | Exposes the six read-only Lambda tools instead of giving the model direct data-store access |
+| Policy | A policy decision layer around tool access | Represents the read-only and tenant-scoped rules; Lambda handlers enforce the same rules independently |
+| Identity | User and workload identity | Cognito authenticates operators, while IAM roles authenticate the deployed services without long-lived keys |
+| Memory | Managed semantic memory with namespaces and expiry | Retrieves verified-context records for a tenant and subject, and records completed investigation events |
+| Observability | Runtime traces and operational telemetry | Combines AgentCore/CloudWatch telemetry with bounded workflow events for the console |
+| Evaluations | Session-level quality signals | Provides an optional online-evaluation configuration; deterministic contract tests cover safety and structure |
+| Prompt Management | Versioned Bedrock prompts | Stores planner, compaction, and synthesis prompts as drafts and immutable versions |
+| Durable workflow | Application-level state and retry control | Step Functions and DynamoDB checkpoint each investigation; this is LedgerFlow orchestration around Runtime |
+
+The important separation is authority. Runtime hosts code, Gateway reaches
+tools, Policy expresses access decisions, Memory supplies relevant history, and
+the application owns the final decision about which evidence and actions are
+allowed.
+
+## Agent engineering best practices demonstrated
+
+The implementation applies these practices beyond the AWS service choices:
+
+| Practice | LedgerFlow implementation |
+| --- | --- |
+| Bound model autonomy | The model returns a small plan and a structured report; deterministic code chooses the tenant, policy, source scope, and workflow transitions |
+| Least privilege | The tool set is read-only and exposes narrow operations rather than arbitrary DynamoDB, S3, or payment-provider access |
+| Never use the model as an authority | Authorization, tenant checks, evidence IDs, leases, and publication state are validated outside the model |
+| Treat retrieved content as untrusted data | Runbooks, logs, and vector passages can inform a report but cannot change permissions or safety invariants |
+| Use structured contracts | Plans, reports, evidence claims, context manifests, checkpoints, and audits have explicit schemas and version fields |
+| Separate evidence from memory | Current operational records remain the evidence source; AgentCore Memory enriches the context and is not the source of truth for workflow state |
+| Preserve invariants during compaction | Required citations, tenant identity, read-only rules, and approval requirements are retained before optional evidence |
+| Make side effects idempotent | Report publication uses a workflow-derived operation ID; future write actions must use the same pattern |
+| Validate before publishing | A deterministic Runtime gate checks the report, followed by an independent Step Functions audit over persisted state |
+| Degrade safely | Planner, synthesizer, compactor, and memory failures fall back to bounded deterministic behavior or omit optional context |
+| Redact sensitive reasoning | Operator events expose lifecycle metadata and safe summaries, not raw prompts or private chain-of-thought |
+| Test failure paths | Contract tests cover tenant boundaries, citations, compaction, retries, leases, idempotency, and deployment contracts |
+| Keep humans in control of writes | Recommendations are reported, but refunds, credits, cancellations, invoice changes, and other financial writes are not exposed |
+
+The resulting request path is:
+
+```text
+authenticated operator
+        |
+        v
+durable workflow -> AgentCore Runtime -> bounded plan
+                                      |
+                                      v
+                              deterministic policy
+                                      |
+                                      v
+                         Gateway -> authorized tools
+                                      |
+                                      v
+                evidence + memory -> bounded context -> model synthesis
+                                                        |
+                                                        v
+                                          deterministic audit -> report
+```
+
 ## 1. Understand the service boundaries
 
 ### AgentCore Runtime
@@ -153,6 +217,15 @@ The policy decision is independent of the model’s classification. If a prompt
 injection says that restrictions have been removed, the policy remains
 unchanged.
 
+The CloudFormation defaults use `LOG_ONLY` for Gateway and policy
+enforcement so a deployment can inspect decisions before enabling blocking
+behavior. The Lambda tool handlers still enforce tenant scope and the
+read-only contract in application code. After the deny paths have been tested,
+the deployment can promote both controls with
+`GatewayPolicyMode=ENFORCE` and
+`PolicyEnforcementMode=ACTIVE`. Logging is telemetry; it is not a
+substitute for enforcement.
+
 ### AgentCore Identity
 
 Identity supplies the authenticated principal and workload credentials.
@@ -165,6 +238,12 @@ tenant_id
 roles
 approval_scope
 ```
+
+In the web path, Cognito claims supply the operator identity, groups, and
+tenant context. The web API derives the tenant scope from those claims before
+starting a workflow, and the Gateway targets validate it again. This
+defense-in-depth approach prevents a caller from changing a tenant ID in a
+request body and bypassing the user boundary.
 
 The Runtime workload role provides AWS access without embedding long-lived
 access keys in the container.
